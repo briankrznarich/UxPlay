@@ -73,6 +73,11 @@
 #include "renderers/video_renderer.h"
 #include "renderers/audio_renderer.h"
 #include "renderers/mux_renderer.h"
+#ifdef ENABLE_MULTIDEVICE
+#include "multidevice/supervisor.h"
+#include "multidevice/worker.h"
+static unsigned int multidevice_limit = 0;
+#endif
 #ifdef DBUS
 #include <dbus/dbus.h>
 #endif
@@ -1104,6 +1109,9 @@ static void print_info (char *name) {
     printf("Usage: %s [-n name] [-s wxh] [-p [n]] [(other options)]\n", name);
     printf("Options:\n");
     printf("-n name   Specify network name of the AirPlay server (UTF-8/ascii)\n");
+#ifdef ENABLE_MULTIDEVICE
+    printf("-multi n  Experimental: accept up to n devices under one receiver name (1-128)\n");
+#endif
     printf("-nh       Do not add \"@hostname\" at the end of AirPlay server name\n");
     printf("-h265     Support h265 (4K) video (with h265 versions of h264 plugins)\n");
     printf("-mp4 [fn] Record (non-HLS)audio/video to mp4 file \"fn.[n].[format].mp4\"\n");
@@ -1578,7 +1586,19 @@ static void parse_arguments (int argc, char *argv[]) {
     }
     for (int i = 1; i < argc; i++) {
         std::string arg(argv[i]);
-        if (arg == "-rc") {
+        if (arg == "-multi") {
+#ifdef ENABLE_MULTIDEVICE
+            unsigned int limit = 128;
+            if (i + 1 >= argc || !get_value(argv[++i], &limit) || !limit) {
+                fprintf(stderr, "-multi requires a device limit between 1 and 128\n");
+                exit(1);
+            }
+            multidevice_limit = limit;
+#else
+            fprintf(stderr, "This build does not include multi-device support\n");
+            exit(1);
+#endif
+        } else if (arg == "-rc") {
             i++;  //specifies startup file: has already been processed
         } else if (arg == "-allow") {
             if (!option_has_value(i, argc, arg, argv[i+1])) exit(1);
@@ -2599,6 +2619,9 @@ static bool check_blocked_client(char *deviceid) {
 //to be simplified
 
 extern "C" void video_reset(void *cls, reset_type_t type) {
+#ifdef ENABLE_MULTIDEVICE
+    multidevice::worker_video(false);
+#endif
     switch (type) {
     case RESET_TYPE_NOHOLD:
         LOGD("video_reset: type = NoHold");
@@ -2725,6 +2748,9 @@ extern "C" void conn_destroy (void *cls) {
     open_connections--;
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
+#ifdef ENABLE_MULTIDEVICE
+        multidevice::worker_video(false);
+#endif
         remote_clock_offset = 0;
         if (use_audio) {
             audio_renderer_stop();
@@ -2779,6 +2805,9 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
         LOGI("*** attempt to connect by blocked client (clientID %s): DENIED\n", deviceid);
     }
     // Pass device model to renderer for device frame display
+#ifdef ENABLE_MULTIDEVICE
+    if (*admit) multidevice::worker_event("client", deviceid, name, model);
+#endif
     if (*admit && use_video) {
         video_renderer_set_device_model(model, name);
     }
@@ -2820,6 +2849,9 @@ extern "C" void audio_process (void *cls, raop_ntp_t *ntp, audio_decode_struct *
 }
 
 extern "C" void video_process (void *cls, raop_ntp_t *ntp, video_decode_struct *data) {
+#ifdef ENABLE_MULTIDEVICE
+    multidevice::worker_video(true);
+#endif
     if (dump_video) {
         dump_video_to_file(data->data, data->data_len);
     }
@@ -3181,7 +3213,8 @@ extern "C" void log_callback (void *cls, int level, const char *msg) {
     }
 }
 
-static int start_raop_server (unsigned short display[5], unsigned short tcp[3], unsigned short udp[3], bool debug_log) {
+static int start_raop_server (unsigned short display[5], unsigned short tcp[3], unsigned short udp[3], bool debug_log,
+                              bool listen = true) {
     raop_callbacks_t raop_cbs;
     memset(&raop_cbs, 0, sizeof(raop_cbs));
     raop_cbs.conn_init = conn_init;
@@ -3231,8 +3264,12 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     if (raop_init2(raop, nohold, mac_address.c_str(), keyfile.c_str())){
         LOGE("Error initializing raop (2)!");
         free (raop);
+        raop = NULL;
         return -1;
     }
+#ifdef ENABLE_MULTIDEVICE
+    if (!multidevice::worker_configure(raop)) return -1;
+#endif
 
     /* write desired display pixel width, pixel height, refresh_rate, max_fps, overscanned.  */
     /* use 0 for default values 1920,1080,60,30,0; these are sent to the Airplay client      */
@@ -3253,7 +3290,7 @@ static int start_raop_server (unsigned short display[5], unsigned short tcp[3], 
     raop_set_udp_ports(raop, udp);
 
     raop_port = raop_get_port(raop);
-    raop_start_httpd(raop, &raop_port);
+    if (listen && raop_start_httpd(raop, &raop_port) < 0) return -1;
     raop_set_port(raop, raop_port);
 
     /* use raop_port for airplay_port (instead of tcp[2]) */
@@ -3275,6 +3312,67 @@ static void stop_raop_server () {
     }
     return;
 }
+
+#ifdef ENABLE_MULTIDEVICE
+static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_addr) {
+    multidevice::Options options;
+    options.max_devices = multidevice_limit;
+    options.port = tcp[1];
+    for (int i = 0; i < argc; i++) options.arguments.push_back(argv[i]);
+    // Resolve identity once, including random MAC and hostname suffix. All
+    // workers answer for the same advertised receiver and pairing public key.
+    options.arguments.insert(options.arguments.end(),
+        {"-n", server_name, "-nh", "-m", mac_address});
+    multidevice::Supervisor supervisor(options, [](const multidevice::Event &event) {
+        LOGI("Multi-device %s: session=%s peer=%s device=%s name=%s model=%s",
+             event.type.c_str(), event.session_id.c_str(), event.peer.c_str(),
+             event.device_id.c_str(), event.name.c_str(), event.model.c_str());
+        fflush(stdout);
+    });
+    // The supervisor has no renderer. RAOP initialization supplies the public
+    // key and discovery metadata, but only the supervisor accepts connections.
+    use_audio = use_video = false;
+    int status = 1;
+    std::string error;
+    if (!start_dnssd(hw_addr, server_name) &&
+        !start_raop_server(display, tcp, udp, debug_log, false) &&
+        supervisor.start(error)) {
+        raop_port = airplay_port = supervisor.port();
+        if (!register_dnssd()) {
+            LOGI("Multi-device receiver listening on port %u, capacity %u",
+                 supervisor.port(), multidevice_limit);
+            fflush(stdout);
+            GMainLoop *loop = g_main_loop_new(NULL, FALSE);
+#ifdef _WIN32
+            gmainloop = loop;
+#else
+            signal(SIGINT, SIG_DFL);
+            signal(SIGTERM, SIG_DFL);
+            signal(SIGHUP, SIG_DFL);
+            guint interrupt = g_unix_signal_add(SIGINT, sigint_callback, loop);
+            guint terminate = g_unix_signal_add(SIGTERM, sigterm_callback, loop);
+            guint hangup = g_unix_signal_add(SIGHUP, sighup_callback, loop);
+#endif
+            g_main_loop_run(loop);
+#ifdef _WIN32
+            gmainloop = NULL;
+#else
+            g_source_remove(interrupt);
+            g_source_remove(terminate);
+            g_source_remove(hangup);
+#endif
+            g_main_loop_unref(loop);
+            status = 0;
+        }
+    }
+    if (!error.empty()) LOGE("Multi-device startup failed: %s", error.c_str());
+    unregister_dnssd();
+    supervisor.stop();
+    stop_raop_server();
+    stop_dnssd();
+    return status;
+}
+#endif
 
 static void read_config_file(const char * filename, const char * uxplay_name) {
     std::string config_file = filename;
@@ -3370,6 +3468,9 @@ static void read_config_file(const char * filename, const char * uxplay_name) {
 void real_main (int argc, char *argv[]);
 
 int main (int argc, char *argv[]) {
+#ifdef ENABLE_MULTIDEVICE
+    if (!multidevice::worker_init()) return EXIT_FAILURE;
+#endif
     LOGI("*=== Using gst_macos_main wrapper for GStreamer >= 1.22 on macOS ===*");
     return  gst_macos_main ((GstMainFunc) real_main, argc, argv , NULL);
 }
@@ -3377,6 +3478,9 @@ int main (int argc, char *argv[]) {
 void real_main (int argc, char *argv[]) {
 #else
 int main (int argc, char *argv[]) {
+#ifdef ENABLE_MULTIDEVICE
+    if (!multidevice::worker_init()) return EXIT_FAILURE;
+#endif
 #endif
     std::vector<char> server_hw_addr;
     std::string config_file = "";
@@ -3445,7 +3549,25 @@ int main (int argc, char *argv[]) {
         exit(1);
     }
 #endif
-    
+
+#ifdef ENABLE_MULTIDEVICE
+    if (multidevice_limit || multidevice::worker_enabled()) {
+        if (hls_support || mux_to_file || dump_audio || dump_video || registration_list ||
+            !coverart_filename.empty() || !metadata_filename.empty() ||
+            !dacpfile.empty() || !ble_filename.empty()) {
+            LOGE("-multi supports mirroring only; HLS, recording, file outputs, BLE and -reg are not supported");
+            exit(EXIT_FAILURE);
+        }
+        // Workers retain the requested audio sink and mute options. Each
+        // process owns its audio renderer; only the supervisor has no renderer.
+        if (multidevice::worker_enabled()) {
+            memset(tcp, 0, sizeof(tcp));
+            memset(udp, 0, sizeof(udp));
+            nohold = 0;
+        }
+    }
+#endif
+
     log_level = (debug_log ? LOGGER_DEBUG_DATA : LOGGER_INFO);
     if (debug_log && suppress_packet_debug_data) {
         log_level = LOGGER_DEBUG;
@@ -3660,6 +3782,26 @@ int main (int argc, char *argv[]) {
         append_hostname(server_name);
     }
 
+    if (!use_random_hw_addr) {
+        if (strlen(mac_address.c_str()) == 0) {
+            mac_address = find_mac();
+            LOGI("using system MAC address %s",mac_address.c_str());
+        } else {
+            LOGI("using user-set MAC address %s",mac_address.c_str());
+        }
+    }
+    if (mac_address.empty()) {
+        mac_address = random_mac();
+        LOGI("using randomly-generated MAC address %s",mac_address.c_str());
+    }
+    parse_hw_addr(mac_address, server_hw_addr);
+
+#ifdef ENABLE_MULTIDEVICE
+    if (multidevice_limit && !multidevice::worker_enabled()) {
+        exit(run_multidevice(argc, argv, server_hw_addr));
+    }
+#endif
+
     if (!gstreamer_init()) {
         LOGE ("stopping");
         exit (1);
@@ -3695,20 +3837,6 @@ int main (int argc, char *argv[]) {
     if (udp[0]) {
         LOGI("using network ports UDP %d %d %d TCP %d %d %d", udp[0], udp[1], udp[2], tcp[0], tcp[1], tcp[2]);
     }
-
-    if (!use_random_hw_addr) {
-        if (strlen(mac_address.c_str()) == 0) {
-            mac_address = find_mac();
-            LOGI("using system MAC address %s",mac_address.c_str());	    
-        } else {
-            LOGI("using user-set MAC address %s",mac_address.c_str());
-        }
-    }
-    if (mac_address.empty()) {
-        mac_address = random_mac();
-        LOGI("using randomly-generated MAC address %s",mac_address.c_str());
-    }
-    parse_hw_addr(mac_address, server_hw_addr);
 
     if (coverart_filename.length()) {
         LOGI("any AirPlay audio cover-art will be written to file  %s",coverart_filename.c_str());
@@ -3760,6 +3888,11 @@ int main (int argc, char *argv[]) {
         LOGI("Bluetooth LE beacon-based service discovery is possible: PID data written to %s", ble_filename.c_str());
     }
     
+#ifdef ENABLE_MULTIDEVICE
+    if (multidevice::worker_enabled()) {
+        multidevice::worker_ready(raop_port);
+    } else
+#endif
     if (register_dnssd()) {
         stop_raop_server();
         stop_dnssd();
@@ -3814,7 +3947,7 @@ static void cleanup() {
     if (use_video)  {
         video_renderer_destroy();
     }
-    logger_destroy(render_logger);
+    if (render_logger) logger_destroy(render_logger);
     render_logger = NULL;
     if(audio_dumpfile) {
         fclose(audio_dumpfile);

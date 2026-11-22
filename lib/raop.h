@@ -43,7 +43,13 @@ typedef enum hls_video_codec_e {
 } hls_video_codec_t;
 
 const char *get_codec_string(hls_video_codec_t codec);
-  
+
+/* Optional trusted local control proxy. Set before starting the listener.
+ * Media/timing traffic uses this peer; non-loopback control clients are refused.
+ * A NULL address restores normal direct-client operation. */
+RAOP_API int raop_set_proxy_remote(raop_t *raop, const unsigned char *address,
+                                  int length, unsigned int zone_id);
+
 typedef void (*raop_log_callback_t)(void *cls, int level, const char *msg);
 
 typedef struct playback_info_s {

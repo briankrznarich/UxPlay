@@ -43,6 +43,9 @@ static void plist_mem_free(void *ptr) {
 #endif
 
 struct raop_s {
+    unsigned char proxy_remote[16];
+    int proxy_remotelen;
+    unsigned int proxy_zone_id;
     /* Callbacks for audio and video */
     raop_callbacks_t callbacks;
 
@@ -134,6 +137,18 @@ conn_init(void *opaque, unsigned char *local, int locallen, unsigned char *remot
     char ip_address[40] = { '\0' };
     assert(raop);
 
+    if (raop->proxy_remotelen) {
+        static const unsigned char loopback6[16] = {0,0,0,0,0,0,0,0,0,0,0,0,0,0,0,1};
+        if (!((remotelen == 4 && remote[0] == 127) ||
+              (remotelen == 16 && !memcmp(remote, loopback6, 16)))) {
+            logger_log(raop->logger, LOGGER_WARNING, "Refusing direct connection to a proxied receiver");
+            return NULL;
+        }
+        remote = raop->proxy_remote;
+        remotelen = raop->proxy_remotelen;
+        zone_id = raop->proxy_zone_id;
+    }
+
     conn = calloc(1, sizeof(raop_conn_t));
     if (!conn) {
         return NULL;
@@ -186,6 +201,15 @@ conn_init(void *opaque, unsigned char *local, int locallen, unsigned char *remot
     }
 
     return conn;
+}
+
+int
+raop_set_proxy_remote(raop_t *raop, const unsigned char *address, int length, unsigned int zone_id) {
+    if (!raop || (address && length != 4 && length != 16)) return -1;
+    raop->proxy_remotelen = address ? length : 0;
+    raop->proxy_zone_id = zone_id;
+    if (address) memcpy(raop->proxy_remote, address, length);
+    return 0;
 }
 
 static void

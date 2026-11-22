@@ -1,3 +1,8 @@
+> **Experimental fork feature:** `-multi N` adds multiple screen-mirroring workers
+> behind one advertised receiver. See [MULTIDEVICE.md](MULTIDEVICE.md) for build/run
+> instructions, scope, architecture and verification status. Report issues with
+> this experimental feature to this fork, rather than upstream.
+
 # UxPlay 1.74 (Experimental): AirPlay-Mirror and AirPlay-Audio server for Linux, macOS, and Unix (also runs on Windows).
 
 ### **Now developed at the GitHub site <https://github.com/FDH2/UxPlay> (where ALL user issues should be posted, and latest versions can be found).**

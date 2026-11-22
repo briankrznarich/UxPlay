@@ -8,6 +8,12 @@ uxplay \- start AirPlay server
 UxPlay 1.74: An open\-source AirPlay mirroring (+ audio streaming) server:
 .SH OPTIONS
 .TP
+\fB\-multi\fR n
+Experimental: accept up to n peers (1-128) under one receiver name using isolated
+worker processes. Each worker plays audio; use \fB\-as 0\fR to mute all workers.
+HLS, recording and shared output files are not supported. Worker media ports
+are dynamically assigned. See MULTIDEVICE.md.
+.TP
 .B
 \fB\-n\fR name   Specify the network name of the AirPlay server (UTF-8/ascii)
 .TP
