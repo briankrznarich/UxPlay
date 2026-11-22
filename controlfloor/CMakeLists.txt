@@ -1,0 +1,33 @@
+include(FetchContent)
+find_package(OpenSSL REQUIRED)
+set(USE_TLS ON CACHE BOOL "" FORCE)
+set(USE_OPEN_SSL ON CACHE BOOL "" FORCE)
+set(IXWEBSOCKET_INSTALL OFF CACHE BOOL "" FORCE)
+FetchContent_Declare(ixwebsocket
+  GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
+  GIT_TAG 2efe037c9cc96fd536774f17bdb5215161ee5087)
+FetchContent_MakeAvailable(ixwebsocket)
+FetchContent_Declare(cf_json
+  URL https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
+  URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
+  DOWNLOAD_NO_EXTRACT TRUE)
+FetchContent_MakeAvailable(cf_json)
+find_package(PkgConfig REQUIRED)
+pkg_check_modules(CF_GST REQUIRED IMPORTED_TARGET gstreamer-app-1.0 gstreamer-video-1.0)
+pkg_check_modules(CF_OCR REQUIRED IMPORTED_TARGET tesseract lept)
+add_library(controlfloor_identity STATIC identity.cpp)
+target_include_directories(controlfloor_identity PUBLIC ${cf_json_SOURCE_DIR} ${CMAKE_CURRENT_SOURCE_DIR})
+target_link_libraries(controlfloor_identity PUBLIC PkgConfig::CF_GST PkgConfig::CF_OCR)
+add_library(controlfloor STATIC controlfloor.cpp mouse_input.cpp test_source.cpp)
+target_include_directories(controlfloor PRIVATE ${cf_json_SOURCE_DIR})
+target_link_libraries(controlfloor PUBLIC ixwebsocket PkgConfig::CF_GST controlfloor_identity)
+
+option(BUILD_CONTROLFLOOR_TESTS "Build headless ControlFloor/OCR test harness" OFF)
+if (BUILD_CONTROLFLOOR_TESTS)
+  enable_testing()
+  add_executable(controlfloor_identity_parser tests/identity_parser.cpp)
+  target_link_libraries(controlfloor_identity_parser PRIVATE controlfloor_identity)
+  add_test(NAME controlfloor_identity_parser COMMAND controlfloor_identity_parser)
+  add_executable(controlfloor_ocr_harness tests/ocr_harness.cpp)
+  target_link_libraries(controlfloor_ocr_harness PRIVATE controlfloor)
+endif()

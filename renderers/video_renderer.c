@@ -20,6 +20,9 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
  */
 
+#ifdef ENABLE_CONTROLFLOOR
+#include "../controlfloor/controlfloor.h"
+#endif
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include "video_renderer.h"
@@ -392,6 +395,11 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 append_videoflip(launch, &videoflip[0], &videoflip[1]);
                 g_string_append(launch, converter);
                 g_string_append(launch, " ! ");
+#ifdef ENABLE_CONTROLFLOOR
+                if (cf_enabled() && !jpeg_pipeline) {
+                    g_string_append(launch, "tee name=cf_tee ! queue ! ");
+                }
+#endif
                 g_string_append(launch, "videoscale ! ");
                 if (jpeg_pipeline) {
                     g_string_append(launch, " imagefreeze allow-replace=TRUE ! textoverlay name=metadata_overlay ! ");
@@ -410,6 +418,11 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                     sync = false;
                 }
             }
+#ifdef ENABLE_CONTROLFLOOR
+            if (cf_enabled() && !jpeg_pipeline && !rtp) {
+                g_string_append(launch, " cf_tee. ! queue leaky=downstream max-size-buffers=1 max-size-bytes=0 max-size-time=0 ! appsink name=cf_capture sync=false async=false max-buffers=1 drop=true");
+            }
+#endif
             if (!strcmp(renderer_type[i]->codec, h264)) {
                 char *pos = launch->str;
                 while ((pos = strstr(pos,h265))){
@@ -437,6 +450,9 @@ void video_renderer_init(logger_t *render_logger, const char *server_name, video
                 g_clear_error (&error);
             }
             g_assert (renderer_type[i]->pipeline);
+#ifdef ENABLE_CONTROLFLOOR
+            cf_attach(renderer_type[i]->pipeline);
+#endif
             GstClock *clock = gst_system_clock_obtain();
             g_object_set(clock, "clock-type", GST_CLOCK_TYPE_REALTIME, NULL);
             gst_pipeline_use_clock(GST_PIPELINE_CAST(renderer_type[i]->pipeline), clock);

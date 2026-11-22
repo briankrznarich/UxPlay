@@ -20,6 +20,9 @@
  * Inc., 51 Franklin Street, Fifth Floor, Boston, MA 02110-1301  USA
  */
 
+#ifdef ENABLE_CONTROLFLOOR
+#include "controlfloor/controlfloor.h"
+#endif
 #include <stddef.h>
 #include <cstring>
 #include <unistd.h>
@@ -1108,6 +1111,9 @@ static void print_info (char *name) {
     printf("=========== Website: https://github.com/FDH2/UxPlay ==========\n");
     printf("Usage: %s [-n name] [-s wxh] [-p [n]] [(other options)]\n", name);
     printf("Options:\n");
+#ifdef ENABLE_CONTROLFLOOR
+    cf_help();
+#endif
     printf("-n name   Specify network name of the AirPlay server (UTF-8/ascii)\n");
 #ifdef ENABLE_MULTIDEVICE
     printf("-multi n  Experimental: accept up to n devices under one receiver name (1-128)\n");
@@ -1585,6 +1591,9 @@ static void parse_arguments (int argc, char *argv[]) {
         }
     }
     for (int i = 1; i < argc; i++) {
+#ifdef ENABLE_CONTROLFLOOR
+        if (cf_option(argc, argv, &i)) continue;
+#endif
         std::string arg(argv[i]);
         if (arg == "-multi") {
 #ifdef ENABLE_MULTIDEVICE
@@ -2739,6 +2748,9 @@ extern "C" void export_dacp(void *cls, const char *active_remote, const char *da
 
 extern "C" void conn_init (void *cls) {
     open_connections++;
+#ifdef ENABLE_CONTROLFLOOR
+    if (open_connections == 1) cf_connection_open();
+#endif
     LOGD("Open connections: %i", open_connections);
     //video_renderer_update_background(1);
 }
@@ -2748,6 +2760,9 @@ extern "C" void conn_destroy (void *cls) {
     open_connections--;
     LOGD("Open connections: %i", open_connections);
     if (open_connections == 0) {
+#ifdef ENABLE_CONTROLFLOOR
+        cf_disconnected();
+#endif
 #ifdef ENABLE_MULTIDEVICE
         multidevice::worker_video(false);
 #endif
@@ -2804,6 +2819,9 @@ extern "C" void report_client_request(void *cls, char *deviceid, char * model, c
         *admit = false;
         LOGI("*** attempt to connect by blocked client (clientID %s): DENIED\n", deviceid);
     }
+#ifdef ENABLE_CONTROLFLOOR
+    if (*admit) cf_client(deviceid, name, model);
+#endif
     // Pass device model to renderer for device frame display
 #ifdef ENABLE_MULTIDEVICE
     if (*admit) multidevice::worker_event("client", deviceid, name, model);
@@ -3471,6 +3489,14 @@ int main (int argc, char *argv[]) {
 #ifdef ENABLE_MULTIDEVICE
     if (!multidevice::worker_init()) return EXIT_FAILURE;
 #endif
+#ifdef ENABLE_CONTROLFLOOR
+    for (int i = 1; i < argc; i++) {
+        if (!strcmp(argv[i], "--controlfloor-register") ||
+            (!strcmp(argv[i], "--controlfloor-test-source") && !getenv("CF_TEST_GL"))) {
+            real_main(argc, argv); return 0;
+        }
+    }
+#endif
     LOGI("*=== Using gst_macos_main wrapper for GStreamer >= 1.22 on macOS ===*");
     return  gst_macos_main ((GstMainFunc) real_main, argc, argv , NULL);
 }
@@ -3542,6 +3568,19 @@ int main (int argc, char *argv[]) {
         read_config_file(config_file.c_str(), argv[0]);
     }
     parse_arguments (argc, argv);
+#ifdef ENABLE_CONTROLFLOOR
+    int prepared = cf_prepare();
+    if (prepared != 0) exit(prepared > 0 ? 0 : 1);
+    if (cf_enabled() && (!use_video || !rtp_pipeline.empty() || hls_support || mux_to_file)) {
+        fprintf(stderr, "ControlFloor requires decoded mirroring video (no -vn, -vrtp, -hls or -mp4).\n");
+        exit(1);
+    }
+#ifdef ENABLE_MULTIDEVICE
+    if (cf_test_source() && (multidevice_limit || multidevice::worker_enabled())) {
+        fprintf(stderr, "Synthetic ControlFloor tests cannot be combined with -multi.\n"); exit(1);
+    }
+#endif
+#endif
 
 #if !defined(__APPLE__) || !defined(UXPLAY_HAVE_APPLE_P2P)
     if (peer_to_peer) {
@@ -3807,6 +3846,11 @@ int main (int argc, char *argv[]) {
         exit (1);
     }
 
+#ifdef ENABLE_CONTROLFLOOR
+    int cf_result = cf_start();
+    if (cf_result != 0) exit(cf_result > 0 ? 0 : 1);
+    if (cf_test_source()) exit(cf_run_test_source());
+#endif
     render_logger = logger_init();
     logger_set_callback(render_logger, log_callback, NULL);
     logger_set_level(render_logger, log_level);
@@ -3941,6 +3985,9 @@ int main (int argc, char *argv[]) {
 }
  
 static void cleanup() {
+#ifdef ENABLE_CONTROLFLOOR
+    cf_stop();
+#endif
     if (use_audio) {
         audio_renderer_destroy();
     }

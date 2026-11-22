@@ -1,2 +1,5 @@
 build/
 .vscode/
+# Connection logs contain OCR/device identifiers. Provider credentials stay outside the repo.
+log/
+__pycache__/

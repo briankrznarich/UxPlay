@@ -3,9 +3,11 @@
 This guide lives on the `controlfloor` branch. The receiver's default `master`
 branch remains focused on reusable multi-device AirPlay support.
 
-The branching workflow below is established. The architecture section is a
-proposal for the next implementation: OCR pairing and ControlFloor integration
-have not yet been ported into this branch.
+The branching workflow below is established. The first OCR-gated ControlFloor
+port is now implemented; build/run details are in
+[`controlfloor/README.md`](../controlfloor/README.md). The architecture below the
+current-status section describes the longer-term coordinator design, not a claim
+that automatic hardware pairing has shipped.
 
 ## Repository and branch arrangement
 
@@ -98,7 +100,7 @@ branches so dependencies and configuration do not leak between them:
 
 ```sh
 cmake -S . -B build/receiver -DCMAKE_BUILD_TYPE=RelWithDebInfo \
-  -DBUILD_MULTIDEVICE_TESTS=ON
+  -DENABLE_CONTROLFLOOR=OFF -DBUILD_MULTIDEVICE_TESTS=ON
 cmake --build build/receiver -j 6
 ctest --test-dir build/receiver --output-on-failure
 python3 multidevice/tests/test_receiver.py build/receiver/uxplay
@@ -144,31 +146,41 @@ not require force-pushing or replaying the entire feature stack by cherry-pick.
   protocol changes and test/documentation updates when they are independently
   reviewable. Avoid unrelated formatting or whole-file replacement.
 - Keep product dependencies optional. The receiver must remain buildable
-  without ControlFloor/OCR packages. Concrete build flags belong with the port;
-  this guide does not imply those flags already exist on this branch.
+  without ControlFloor/OCR packages: configure `-DENABLE_CONTROLFLOOR=OFF`.
 
-## What to reuse from the existing ControlFloor proof of concept
+## Current implementation (November 2026)
 
-The reference implementation is the working tree at
-`/Users/briank/git/UxPlay`, primarily `controlfloor/` and its renderer hooks.
-That checkout currently has uncommitted changes, including text-input support
-and tests. Review and preserve its working-tree changes before porting; its
-committed history alone does not represent everything that currently works.
-Do not overwrite or clean that checkout as part of this integration.
+The working-tree ControlFloor code from `/Users/briank/git/UxPlay` has been ported,
+including its uncommitted text-input validation and tests. The old checkout was
+left untouched. JPEG configuration/ACK logic, command compatibility and the
+input adapter were reused rather than rewritten.
 
-Reuse the existing implementation and tests for:
+The current, intentionally manual pairing path is:
 
-- JPEG sizing, quality, frame-rate/bandwidth settings and ACK/backpressure logic.
-- Bounded latest-frame capture and separate encoding/network execution.
-- ControlFloor command envelopes, capability/status replies and error behavior.
-- Input translation, complete-string validation before typing, queue expiry,
-  session cancellation and best-effort release of held buttons.
+```text
+worker receives AirPlay -> OCR X=<keyboard ID>=X -> two matching About reads
+    -> airplay-<serial> -> worker's ControlFloor WebSocket
+```
 
-The existing implementation uses process-global state in `controlfloor.cpp`, a
-constant `airplay-test-12345` device ID, and a `cf_client()` callback that makes
-an arriving AirPlay client immediately eligible for a ControlFloor connection.
-`MouseInput` requires exactly one entry in `iphone-use`'s Bluetooth inventory.
-Those assumptions must change before combining the implementations.
+`IdentityGate` owns OCR and connection logs. Capture is available while AirPlay
+is connected even before ControlFloor admission. Connection generations reject
+stale results; disconnect revokes admission. Local video/audio continue normally.
+A common log directory supplies serial/helper ownership locks across workers.
+
+This PoC retains process-local provider state: one worker, one identified phone.
+It does not yet wrap all provider state in a session class. The Tesseract module
+and input adapter are separate and can be connected to a future coordinator.
+The supervisor and its IPC protocol are unchanged.
+
+The keyboard marker is typed by the user, is not a nonce, and does not select a
+hardware target. Input still uses the sole iphone-use Bluetooth device; only one
+worker can claim that helper. OCR uses full-frame sampling every five seconds,
+English About labels, and stops at identification. Two scans may use the same
+static About frame. No automatic navigation, shortcut callback server, persistent
+pairing registry or fresh challenge protocol is implemented yet.
+
+These limits are deliberate for this iteration. The following sections remain
+recommendations for expanding this into automatic multi-keyboard orchestration.
 
 ## Proposed ownership and module boundaries
 
@@ -208,9 +220,9 @@ protocol handles lifecycle events and STOP only; these extensions are planned.
 
 ## Separate video capture from ControlFloor admission
 
-Currently the frame tap is attached through `cf_attach()` and capture state is
-coupled to the provider's `running`/`active` flags. OCR must work before provider
-admission, so frame availability must be independent of ControlFloor state.
+The frame tap is attached through `cf_attach()`. It now uses AirPlay-connected
+state independently of ControlFloor admission. Preserve that separation as the
+coordinator design grows.
 
 Retain one decoded-frame tap. Feed OCR and JPEG encoding through separate,
 bounded latest-sample slots, retaining sample references as needed. The capture
@@ -268,20 +280,16 @@ validate immediately before dispatch and avoid retrying uncertain text input.
 A ControlFloor network reconnect alone need not repeat hardware identification
 if the same AirPlay connection and verified hardware binding remain valid.
 
-## Incremental implementation order
+## Further implementation sequence
 
-1. Add the independent frame tap and OCR result path, without ControlFloor.
-2. Demonstrate two keyboard challenges and two serials correctly associated
-   with two streams. Initially navigate the phones manually; show pairing state
-   and failure reasons locally.
-3. Test ambiguous text, stale results, reconnects, duplicates, hardware loss and
-   cancellation before enabling product admission.
-4. Port the existing ControlFloor session and video protocol behind the gate,
-   replacing the dummy ID with the verified registry identity.
-5. Route remote input to the explicitly bound controller and extend the old
-   input tests for multiple devices and binding generations.
-6. Automate startup navigation and shortcut callbacks around that same state
-   machine. Preserve the manual path for diagnosis and recovery.
-
-This sequence reuses the proven video/protocol work while establishing identity
-and ownership before adding unattended control.
+1. Add explicit controller identities and a coordinator registry; replace the
+   one-helper assumption with a validated stream/controller binding.
+2. Extend worker IPC with typed OCR/admission/input events and connection tokens.
+   Keep pixels in workers and keep the independent frame tap.
+3. Generate fresh keyboard challenges, automate shortcut callbacks/navigation,
+   and validate ownership before admission. Retain manual identification for
+   diagnosis and recovery.
+4. Test two real keyboards/phones, stale challenges, reassignment, hardware loss
+   and cancellation while preserving the existing video/protocol regression tests.
+5. Extract the remaining provider globals into a session object when doing that
+   ownership refactor; avoid coupling the reusable receiver to product logic.
