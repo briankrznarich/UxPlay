@@ -99,6 +99,20 @@ async def main(binary):
                 assert calls[1][1]['path']==[{'x':50,'y':60},{'x':60,'y':70}]
                 assert not held
                 print('PASS readiness, existing profile, logical geometry, input capabilities, ordered mouse API and target ownership')
+                # iphone-use exposes eight HID buttons, including shortcut trigger Mouse 8.
+                for button in range(1,9):
+                    for action in ('mouseDown','mouseUp'):
+                        response=await s.command(action,{'button':button})
+                        assert response['status']=='ok',response
+                        assert calls[-1][0]==action and calls[-1][1]['button']==button
+                        assert 'x' not in calls[-1][1] and 'y' not in calls[-1][1]
+                    assert not held
+                for button in (0,9,-1,1.5,True,'8'):
+                    before=len(calls)
+                    response=await s.command('mouseDown',{'button':button})
+                    assert response['status']=='error' and '1 to 8' in response['error'],response
+                    assert len(calls)==before
+                print('PASS all eight mouse buttons forwarded without repositioning; invalid button values rejected')
                 await s.command('disableLiveMouse')
                 # Every supported mapping, and both aliases, without Live Mouse enabled.
                 valid=''.join(chr(c) for c in range(32,127))+'\t\n'

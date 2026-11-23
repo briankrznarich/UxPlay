@@ -192,6 +192,10 @@ the iphone-use catalogs through the normal ControlFloor response envelopes. The
 frontend expresses ordinary taps/swipes through the live-mouse commands; native CFAgent tap/swipe and multitouch APIs are
 not emulated.
 
+Mouse `button` accepts integers 1–8, matching iphone-use's HID report: 1 is left,
+2 right, 3 middle, and 4–8 are additional buttons (including shortcut triggers).
+Button-only down/up calls preserve the pointer position.
+
 `typeSpecialKey` accepts the same `{ "key": "Backspace" }` arguments as cfprovider.
 The modern iphone-use endpoint owns all mappings and aliases: Backspace, forward
 Delete, Enter/Tab/Escape, arrows, Home/End/PageUp/PageDown, F1–F12, ordinary keys,

@@ -504,8 +504,8 @@ void MouseInput::submit(const Json &request, const Json &args) {
             }
         }
         if (clean.contains("button") &&
-            (!clean["button"].is_number_integer() || clean["button"] < 1 || clean["button"] > 3))
-            throw std::runtime_error("Mouse button must be 1, 2, or 3");
+            (!clean["button"].is_number_integer() || clean["button"] < 1 || clean["button"] > 8))
+            throw std::runtime_error("Mouse button must be an integer from 1 to 8");
     }
     std::lock_guard<std::mutex> l(impl->mutex);
     if (!impl->running)
