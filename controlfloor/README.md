@@ -150,6 +150,24 @@ screenshots are saved. Log rotation is not implemented yet.
 AirPlay disconnect/replacement revokes admission, drops queued frames/input,
 closes the device WebSocket and requires identification on the next connection.
 A server-only reconnect preserves identification for the same AirPlay connection.
+Failed login/upgrade attempts retry on a ten-second schedule. Connection loss
+returns to the same retry loop. Invalid credentials remain an error: workers do not register a
+replacement account, edit the credential file or repeat OCR to repair it.
+
+`controlfloor-admitted` means the local OCR gate has allowed a connection attempt;
+it is not an acknowledgment from the server. A WebSocket upgrade is logged as
+`provider WebSocket transport open; awaiting ControlFloor commands`. The first
+server command produces `ControlFloor protocol active`; this confirms protocol
+traffic, not visibility in a particular user's device list. WebSocket failures
+log the HTTP status, and closes log the close code and which side closed it.
+Structured events include `provider-connect-attempt`, `provider-connect-failed`,
+`provider-websocket-error` and `provider-websocket-close`.
+
+The server sends application pings every 20 seconds. If no server command arrives
+for 60 seconds, the worker logs `provider-heartbeat-timeout` and reconnects with
+the retained identity. Transport-level pongs alone do not keep a stalled
+ControlFloor command loop alive. This watchdog also runs when video forwarding
+is off.
 Connection generations reject late OCR results and prevent old queued input from
 being dispatched as part of a replacement connection. Already-issued helper
 requests cannot be undone, and uncertain text requests are not retried.
@@ -237,6 +255,8 @@ build/test-venv/bin/pip install aiohttp Pillow
 ctest --test-dir build/controlfloor --output-on-failure
 build/test-venv/bin/python controlfloor/tests/integration.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/mouse.py build/controlfloor/uxplay
+# About two minutes; exercises the real retry and heartbeat deadlines.
+build/test-venv/bin/python controlfloor/tests/reconnect.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/identification.py \
   build/controlfloor/controlfloor/controlfloor_ocr_harness
 ```

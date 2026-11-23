@@ -44,6 +44,13 @@ struct Options {
 } opt;
 std::atomic<bool> running{false}, online{false}, active{false}, forwarding{false}, dirty{false},
     screenshotDemand{false};
+// CF sends an application-level ping every 20 seconds. A successful upgrade
+// alone cannot tell us that its provider command loop is still functioning.
+std::atomic<int64_t> lastServerMessage{0};
+std::atomic<bool> serverConfirmed{false};
+int64_t steadyMillis() {
+    return std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now().time_since_epoch()).count();
+}
 std::atomic<unsigned long> epoch{1}, dropped{0}, encoded{0}, sent{0};
 std::mutex stateMutex, frameMutex, commandMutex;
 std::string phoneName = "AirPlay", phoneModel = "iPhone", generation;
@@ -257,8 +264,12 @@ ix::HttpResponsePtr post(const std::string &path, const J &fields, const std::st
 }
 std::string login(const std::string &user, const std::string &password) {
     auto r = post("/login?noredirect=1", {{"username", user}, {"password", password}});
-    if (r->statusCode != 200)
-        throw std::runtime_error("login failed (HTTP " + std::to_string(r->statusCode) + ")");
+    if (r->statusCode != 200) {
+        std::string reason = "login failed (HTTP " + std::to_string(r->statusCode) + ")";
+        if (r->statusCode == 401 || r->statusCode == 403)
+            reason += "; credentials rejected; retrying will not repair an invalid provider account";
+        throw std::runtime_error(reason);
+    }
     std::string cookie;
     for (auto &h : r->headers) {
         std::string key = h.first;
@@ -719,6 +730,7 @@ void network() {
     auto claimAt = Clock::now();
     Lease deviceLease, inputLease;
     auto retry = Clock::now();
+    unsigned long attempt = 0;
     unsigned long observedEpoch = 0;
     int frameID = 0, lastAck = 0;
     std::map<int, Clock::time_point> flights;
@@ -732,12 +744,27 @@ void network() {
     cfSocket.disablePerMessageDeflate();
     cfSocket.setOnMessageCallback([](const ix::WebSocketMessagePtr &m) {
         if (m->type == ix::WebSocketMessageType::Open) {
+            lastServerMessage = steadyMillis();
+            serverConfirmed = false;
             online = true;
             dirty = true;
-            log("provider WebSocket connected");
+            log("provider WebSocket transport open; awaiting ControlFloor commands");
         } else if (m->type == ix::WebSocketMessageType::Close || m->type == ix::WebSocketMessageType::Error) {
             online = false;
+            serverConfirmed = false;
             mouseInput.reset();
+            if (m->type == ix::WebSocketMessageType::Close) {
+                std::string message = "provider WebSocket closed (code " + std::to_string(m->closeInfo.code) +
+                    (m->closeInfo.remote ? ", remote)" : ", local)");
+                log(message.c_str());
+                identityGate.log("provider-websocket-close", {{"code", m->closeInfo.code},
+                    {"remote", m->closeInfo.remote}, {"retryEnabled", bool(running && active)}});
+            } else {
+                std::string message = "provider WebSocket error (HTTP " + std::to_string(m->errorInfo.http_status) + ")";
+                log(message.c_str());
+                identityGate.log("provider-websocket-error", {{"httpStatus", m->errorInfo.http_status},
+                    {"retryEnabled", bool(running && active)}});
+            }
         } else if (m->type == ix::WebSocketMessageType::Message && !m->binary) {
             if (m->str.size() > 1024 * 1024) {
                 online = false;
@@ -746,6 +773,11 @@ void network() {
             J j = J::parse(m->str, nullptr, false);
             if (!j.is_object())
                 return;
+            if (j.contains("action") && j["action"].is_string() && !j["action"].get<std::string>().empty()) {
+                lastServerMessage = steadyMillis();
+                if (!serverConfirmed.exchange(true))
+                    log("ControlFloor protocol active; received server command");
+            }
             std::lock_guard<std::mutex> l(commandMutex);
             if (commands.size() < 128)
                 commands.push_back(std::move(j));
@@ -768,6 +800,7 @@ void network() {
             flights.clear();
             { std::lock_guard<std::mutex> l(commandMutex); commands.clear(); }
             observedConnection = revision;
+            attempt = 0;
             leaseWarning = false; claimAt = now;
             retry = now;
         }
@@ -810,6 +843,14 @@ void network() {
                     dirty = true;
             mouseState = std::move(next);
         }
+        if (active && online && steadyMillis() - lastServerMessage.load() >= 60000) {
+            log("No ControlFloor command/heartbeat for 60 seconds; reconnecting provider");
+            identityGate.log("provider-heartbeat-timeout", {{"timeoutSeconds", 60}});
+            online = false;
+            cfSocket.stop();
+            mouseInput.reset();
+            retry = now;
+        }
         if (active && !online && now >= retry) {
             cfSocket.stop();
             forwarding = false;
@@ -820,6 +861,11 @@ void network() {
                 std::lock_guard<std::mutex> l(commandMutex);
                 commands.clear();
             }
+            ++attempt;
+            identityGate.log("provider-connect-attempt", {{"attempt", attempt}, {"udid", deviceID},
+                {"retryIntervalSeconds", 10}});
+            log(("ControlFloor connection attempt " + std::to_string(attempt) +
+                 "; failures retry after 10 seconds (OCR identity retained)").c_str());
             try {
                 std::string cookie = login(credentials.at("username"), credentials.at("password"));
                 if (!running)
@@ -833,6 +879,8 @@ void network() {
                 cfSocket.start();
             } catch (const std::exception &e) {
                 log(e.what());
+                identityGate.log("provider-connect-failed", {{"attempt", attempt}, {"error", e.what()},
+                    {"retryAfterSeconds", 10}});
             }
             retry = Clock::now() + std::chrono::seconds(10);
         }
