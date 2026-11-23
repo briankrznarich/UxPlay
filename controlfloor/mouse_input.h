@@ -24,6 +24,8 @@ class MouseInput {
     void submit(const Json &request, const Json &args);
     static bool handles(const std::string &action);
     static bool handlesText(const std::string &action);
+    static bool handlesKeyboard(const std::string &action);
+    static bool handlesCatalog(const std::string &action);
 
   private:
     struct Impl;

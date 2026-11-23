@@ -78,7 +78,7 @@ struct MouseInput::Impl {
     }
     void run() {
         std::string host, error;
-        bool available = false, keyboardAvailable = false, enabled = false, held = false;
+        bool available = false, keyboardAvailable = false, consumerAvailable = false, enabled = false, held = false;
         int width = 375, height = 667;
         J mouse = J::object();
         unsigned long observed = 0;
@@ -131,6 +131,7 @@ struct MouseInput::Impl {
                     // New helpers expose keyboard readiness explicitly. Older versions
                     // report subscriptions in diagnostics (keyboard report ID 1).
                     keyboardAvailable = hosts[0].value("keyboard", false);
+                    consumerAvailable = hosts[0].value("consumerControls", false);
                     if (!hosts[0].contains("keyboard")) {
                         J diagnostics = hosts[0].value("bluetoothDiagnostics", J::object());
                         J reports = diagnostics.value("subscribedReportIDs", J::array());
@@ -155,7 +156,7 @@ struct MouseInput::Impl {
                         release();
                 } catch (const std::exception &e) {
                     error = e.what();
-                    available = keyboardAvailable = enabled = false;
+                    available = keyboardAvailable = consumerAvailable = enabled = false;
                     release();
                 }
                 probeAt = Clock::now() + std::chrono::seconds(1);
@@ -172,7 +173,11 @@ struct MouseInput::Impl {
                     if (Clock::now() - job.at > std::chrono::seconds(1))
                         throw std::runtime_error("Input command expired; input queue was too slow; nothing "
                                                  "from this call was sent");
-                    if (action == "disableLiveMouse") {
+                    if (MouseInput::handlesCatalog(action)) {
+                        // Discovery is read-only and does not need HID subscriptions.
+                        result.value = call("/" + action);
+                        result.value["agent"] = "Bluetooth";
+                    } else if (action == "disableLiveMouse") {
                         enabled = false;
                         release();
                         if (held)
@@ -199,6 +204,25 @@ struct MouseInput::Impl {
                                                          "connection failed during typing");
                             }
                         }
+                    } else if (MouseInput::handlesKeyboard(action)) {
+                        if (!keyboardAvailable && !consumerAvailable)
+                            throw std::runtime_error("Bluetooth keyboard and consumer controls are not ready");
+                        release();
+                        if (held)
+                            throw std::runtime_error("Could not release mouse before keyboard input");
+                        J body = job.args;
+                        body["device"] = host; // Never accept a viewer-supplied target.
+                        // iphone-use owns aliases, HID usages, chord validation and
+                        // per-report readiness checks. In particular, its modern API
+                        // distinguishes Delete (forward) from Backspace; /key does not.
+                        // Keep frontend agent hints compatible with the existing text
+                        // bridge: this provider has one hardware input backend.
+                        try {
+                            result.value = call("/" + action, body);
+                        } catch (const std::exception &e) {
+                            throw std::runtime_error(std::string("iphone-use keyboard request failed: ") +
+                                e.what() + "; not retried; submission may be uncertain after a transport failure");
+                        }
                     } else {
                         if (!available)
                             throw std::runtime_error(error.empty() ? "Bluetooth mouse unavailable" : error);
@@ -223,7 +247,8 @@ struct MouseInput::Impl {
                             held = mouse.value("down", action != "mouseUp");
                         }
                     }
-                    result.value = {{"mouse", mouse}, {"enabled", enabled}, {"bluetoothHost", host}};
+                    if (result.value.is_null())
+                        result.value = {{"mouse", mouse}, {"enabled", enabled}, {"bluetoothHost", host}};
                     if (MouseInput::handlesText(action)) {
                         result.value["charactersSubmitted"] = job.args.at("text").get<std::string>().size();
                         result.value["inputMethod"] = "bluetoothKeyboard";
@@ -242,6 +267,7 @@ struct MouseInput::Impl {
                 if (observed == session)
                     published = {{"available", available},
                                  {"keyboardAvailable", keyboardAvailable},
+                                 {"consumerControlsAvailable", consumerAvailable},
                                  {"enabled", enabled},
                                  {"bluetoothHost", host},
                                  {"logicalWidthPortrait", width},
@@ -281,6 +307,7 @@ void MouseInput::stop() {
     std::lock_guard<std::mutex> l(impl->mutex);
     impl->published["available"] = false;
     impl->published["keyboardAvailable"] = false;
+    impl->published["consumerControlsAvailable"] = false;
     impl->published["enabled"] = false;
 }
 void MouseInput::reset() {
@@ -306,19 +333,50 @@ bool MouseInput::take(Result &result) {
     return true;
 }
 bool MouseInput::handles(const std::string &action) {
-    return handlesText(action) || action == "enableLiveMouse" || action == "disableLiveMouse" ||
+    return handlesKeyboard(action) || handlesCatalog(action) || action == "enableLiveMouse" || action == "disableLiveMouse" ||
            action == "mouseDown" || action == "mouseMove" || action == "mouseUp";
 }
 bool MouseInput::handlesText(const std::string &action) {
     return action == "typeText" || action == "tapText";
 }
+bool MouseInput::handlesKeyboard(const std::string &action) {
+    return handlesText(action) || action == "typeSpecialKey" || action == "pressKeyChord" ||
+           action == "executeKeyboardShortcut";
+}
+bool MouseInput::handlesCatalog(const std::string &action) {
+    return action == "getKeyboardKeys" || action == "getKeyboardShortcuts";
+}
 void MouseInput::submit(const Json &request, const Json &args) {
     if (!args.is_object())
         throw std::runtime_error("Input args must be an object");
     J clean = J::object();
-    if (handlesText(request.at("action")))
+    const std::string action = request.at("action");
+    auto name = [](const J &value, const char *field) {
+        if (!value.is_string() || value.get_ref<const std::string &>().empty() ||
+            value.get_ref<const std::string &>().size() > 128)
+            throw std::runtime_error(std::string(field) + " must be a nonempty string of at most 128 bytes");
+        return value;
+    };
+    if (handlesText(action))
         clean["text"] = checkedText(args);
-    else {
+    else if (action == "typeSpecialKey")
+        clean["key"] = name(args.value("key", J()), "key");
+    else if (action == "pressKeyChord") {
+        J keys = args.value("keys", J());
+        if (!keys.is_array() || keys.empty() || keys.size() > 15)
+            throw std::runtime_error("keys must contain 1–15 key names");
+        for (const auto &key : keys) name(key, "key");
+        clean["keys"] = keys;
+    } else if (action == "executeKeyboardShortcut") {
+        clean["id"] = name(args.value("id", J()), "id");
+        if (args.contains("revision")) {
+            if (!args["revision"].is_string() || args["revision"].get_ref<const std::string &>().size() > 1024)
+                throw std::runtime_error("revision must be a string of at most 1024 bytes");
+            clean["revision"] = args["revision"];
+        }
+    } else if (handlesCatalog(action)) {
+        // Do not forward targets, keys or other caller fields in a discovery GET.
+    } else {
         for (auto key : {"x", "y", "path", "button", "orientation"})
             if (args.contains(key))
                 clean[key] = args[key];

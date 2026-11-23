@@ -168,9 +168,10 @@ class Session:
                     v=header['value']
                     await self.ws.send_json({'action':'ackVideoFrame','args':{'frameId':v['frameId'],'size':len(message.data),'source':v['source'],'sourceGeneration':v['sourceGeneration'],'flowControlVersion':2,'ackSummary':{'lastFrameId':v['frameId'],'framesReceived':1}}})
                 header=None
-    async def command(self,action,args=None):
+    async def command(self,action,args=None,agent=None):
         self.counter+=1;tag=str(self.counter);f=asyncio.get_running_loop().create_future();self.waiters[tag]=f
         request={'action':action,'tag':tag,'ack':1,'cf':{'s':self.counter,'c':47,'d':'airplay-test-12345'}}
+        if agent is not None:request['agent']=agent
         if args is not None:request['args']=args
         await self.ws.send_json(request)
         result=await asyncio.wait_for(f,5)

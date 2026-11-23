@@ -155,6 +155,7 @@ J status() {
             {"mouse", mouseState.value("mouse", J::object())},
             {"mouseEnabled", mouseState.value("enabled", false)},
             {"keyboardAvailable", active && mouseState.value("keyboardAvailable", false)},
+            {"consumerControlsAvailable", active && mouseState.value("consumerControlsAvailable", false)},
             {"mouseError", mouseState.value("error", std::string())},
             {"cfaStatus", "Unavailable"},
             {"wdaStatus", "Unavailable"},
@@ -167,6 +168,7 @@ std::string currentGeneration() {
 J capabilities() {
     J input = mouseInput.state();
     bool keyboard = active && input.value("keyboardAvailable", false);
+    bool consumer = active && input.value("consumerControlsAvailable", false);
     // These compatibility flags mean tapText can be accepted immediately via
     // Bluetooth. They do not claim a native CFAgent or on-screen-keyboard calibration.
     return {{"capabilities",
@@ -176,7 +178,7 @@ J capabilities() {
               {"keyboards", J::array()},
               {"video", true},
               {"audio", false},
-              {"input", keyboard || (active && input.value("available", false))},
+              {"input", keyboard || consumer || (active && input.value("available", false))},
               {"textInputMethod", "bluetoothKeyboard"},
               {"nativeIOS", false}}}};
 }
@@ -837,7 +839,7 @@ void network() {
         {
             J next = mouseInput.state();
             std::lock_guard<std::mutex> l(stateMutex);
-            for (auto key : {"available", "keyboardAvailable", "enabled", "logicalWidthPortrait",
+            for (auto key : {"available", "keyboardAvailable", "consumerControlsAvailable", "enabled", "logicalWidthPortrait",
                              "logicalHeightPortrait", "error"})
                 if (next.value(key, J()) != mouseState.value(key, J()))
                     dirty = true;
@@ -1054,7 +1056,8 @@ void network() {
             } catch (const std::exception &e) {
                 if (request.contains("action") && request["action"].is_string() &&
                     controlfloor::MouseInput::handles(request["action"]) &&
-                    !controlfloor::MouseInput::handlesText(request["action"]))
+                    !controlfloor::MouseInput::handlesKeyboard(request["action"]) &&
+                    !controlfloor::MouseInput::handlesCatalog(request["action"]))
                     mouseInput.reset();
                 send(reply(request, nullptr, e.what()));
             }

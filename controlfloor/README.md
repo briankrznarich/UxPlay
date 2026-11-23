@@ -185,9 +185,36 @@ held lock. Use a common log directory for workers/instances that should coordina
 The adapter requires exactly one Bluetooth device in that helper's inventory and
 uses its current profile without calibration. Supported commands are
 `enableLiveMouse`, `disableLiveMouse`, `mouseDown`, `mouseMove` (including a path),
-`mouseUp`, `typeText`, and `tapText`. The frontend expresses ordinary taps/swipes
-through the live-mouse commands; native CFAgent tap/swipe and multitouch APIs are
+`mouseUp`, `typeText`, `tapText`, `typeSpecialKey`, `pressKeyChord`, and
+`executeKeyboardShortcut`. `getKeyboardKeys` and `getKeyboardShortcuts` expose
+the iphone-use catalogs through the normal ControlFloor response envelopes. The
+frontend expresses ordinary taps/swipes through the live-mouse commands; native CFAgent tap/swipe and multitouch APIs are
 not emulated.
+
+`typeSpecialKey` accepts the same `{ "key": "Backspace" }` arguments as cfprovider.
+The modern iphone-use endpoint owns all mappings and aliases: Backspace, forward
+Delete, Enter/Tab/Escape, arrows, Home/End/PageUp/PageDown, F1–F12, ordinary keys,
+modifiers, numeric keypad, Fn/Globe, consumer/media keys and its virtual recording
+commands. Unknown names return the helper's error. The legacy `/key` endpoint is
+not used because it treats `delete` as Backspace. These are physical HID key
+submissions; individual iOS/app behavior (especially function/media keys) depends
+on the target phone. Pressing a modifier alone does not hold it for a later call;
+use `pressKeyChord` for combinations.
+
+The frontend's existing `CFAgent`/`Bluetooth` routing hints work with this bridge,
+as they already do for text: there is only one hardware backend here. No native
+CFAgent connection is implied. Special keys need a keyboard or consumer-control
+subscription, not live mouse/AssistiveTouch. The helper checks the specific HID
+reports required by each key/chord before emitting input. Read-only catalog calls
+do not require subscriptions. They require the configured helper adapter.
+
+Key/chord/shortcut calls use the same serialized, bounded input queue as mouse
+and text. Only validated key/id/revision fields are forwarded; the provider selects
+the device. A helper error/timeout is returned once, without automatic replay.
+Catalog responses and shortcut revisions pass through unchanged (with the
+`Bluetooth` agent label added to discovery), so the existing keyboard menu can
+use them without a frontend change. An older iphone-use build without these
+endpoints must be updated; there is no lossy fallback to typing control characters.
 
 The recognized keyboard marker is recorded, **not yet used to select hardware**.
 The first identified worker to acquire the configured helper's file lock gets
@@ -255,6 +282,7 @@ build/test-venv/bin/pip install aiohttp Pillow
 ctest --test-dir build/controlfloor --output-on-failure
 build/test-venv/bin/python controlfloor/tests/integration.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/mouse.py build/controlfloor/uxplay
+build/test-venv/bin/python controlfloor/tests/keyboard.py build/controlfloor/uxplay
 # About two minutes; exercises the real retry and heartbeat deadlines.
 build/test-venv/bin/python controlfloor/tests/reconnect.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/identification.py \
