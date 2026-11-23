@@ -947,6 +947,7 @@ void network() {
                     {
                         std::lock_guard<std::mutex> l(stateMutex);
                         args["orientation"] = nativeWidth > nativeHeight ? "landscapeLeft" : "portrait";
+                        args["modelName"] = identified.modelName;
                     }
                     mouseInput.submit(request, args);
                 } else if (action == "getScreenshot") {

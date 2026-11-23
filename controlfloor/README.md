@@ -116,8 +116,9 @@ frame must arrive after the keyboard scan before About parsing begins. A static
 About frame may be read twice; this is recognition consistency, not independent
 proof of hardware ownership. OCR stops after successful identification.
 
-No typing, navigation, shortcut execution or discovery of physical keyboard
-bindings is automated in this version. A failed/ambiguous OCR read leaves local
+During identification, typing, navigation, shortcut execution and discovery of
+physical keyboard bindings still require manual setup. Remote input becomes
+available after admission, as described below. A failed/ambiguous OCR read leaves local
 playback working and keeps the phone out of ControlFloor. Serial numbers must be
 8–16 uppercase ASCII letters/digits; ambiguous characters are never silently
 substituted. If a mistaken ID is accepted, disconnect, correct the displayed
@@ -216,6 +217,62 @@ Catalog responses and shortcut revisions pass through unchanged (with the
 use them without a frontend change. An older iphone-use build without these
 endpoints must be updated; there is no lossy fallback to typing control characters.
 
+### Navigation and hardware buttons
+
+Existing ControlFloor commands are translated locally; no frontend change,
+Shortcuts callback server or USB/CFAgent connection is required:
+
+| ControlFloor call | Preferred input |
+| --- | --- |
+| `simulateHomeButton`, `showHomeScreen`, `performGesture: ShowHomeScreen` | `GoHome` consumer HID; otherwise the `home` keyboard shortcut |
+| `showControlCenter`, `performGesture: ShowControlCenter` | `controlCenter` shortcut |
+| `showAppSwitcher`, `performGesture: ShowAppSwitcher` | `appSwitcher` shortcut |
+| `showNotificationCenter`, `performGesture: ShowNotificationCenter` | `notificationCenter` shortcut |
+| `simulateLockButton`, `performGesture: LockScreen` | `lockScreen` shortcut |
+| `performGesture: AskSiri`, `AccessibilityShortcut` | `siri`, `accessibilityShortcut` shortcuts |
+| `simulateVolumeUpButton`, `simulateVolumeDownButton` | `AudioVolumeUp`, `AudioVolumeDown` consumer HID |
+
+For example, `performGesture` takes `{ "gesture": "ShowControlCenter" }`.
+Named keyboard shortcuts are resolved from iphone-use's current catalog and
+submitted with its revision, so configured overrides apply. Its shipped system
+bindings use Fn/Globe (Control Center: Fn+C, App Switcher: Fn+Up); other bindings
+such as Lock Screen require Full Keyboard Access. The phone must be configured
+for the selected binding; a successful response means input was submitted, not
+that the resulting screen was visually verified.
+
+When a binding is missing/unassigned or its HID reports are unavailable, system
+navigation can fall back to a mouse drag **before any keyboard submission**.
+A disabled binding is an explicit error. Catalog/POST failures are errors, never
+an excuse to send a second action: a failed network request may already have
+operated the phone. Home/volume use the consumer report without requiring the
+ordinary keyboard report. There is no held-home-button emulation (`duration`
+other than zero is rejected).
+
+Mouse fallback uses the OCR model from the provider, never a viewer-supplied
+model. SE and older named iPhones through iPhone 8 use a bottom-up Control Center
+swipe; newer iPhones/iPads use top-right-down. Home and App Switcher swipes are
+only used for the latter layout. SE App Switcher requires its keyboard binding.
+An unknown model has no model-dependent system swipe fallback. Notification
+Center can use a top-center-down swipe.
+
+`performGesture` also supports `CenterSwipeUp/Down/Left/Right`,
+`EdgeSwipeUp/Down/Left/Right`, `PageUp`, `PageDown`, and `JiggleScreenContents`.
+The eight center/edge gestures also accept their direct cfprovider action names
+(`centerSwipeUp`, etc.). Page gestures optionally accept a logical `x`/`y` origin;
+otherwise they start at screen center. These follow CFA's useful single-pointer
+paths with small in-screen edge offsets. Timing is approximate because helper
+HTTP latency and Bluetooth pacing add to it. Mouse profile accuracy and iOS
+recognition of pointer edge gestures still need hardware verification.
+
+Each drag owns its down/move/up sequence on the input worker, without requiring
+`enableLiveMouse` or interleaving another input call. It uses the helper profile's
+logical dimensions and the stream's orientation, releases on failure, and stops
+remaining steps on session disconnect. Video and CF ping run independently.
+Replies include `gesture` and `inputMethod` (`bluetoothKeyboard` or
+`bluetoothMouse`). Unsupported gestures (including CFA placeholder names and
+multitouch) return errors. Gesture translation lives in `navigation.cpp`; hardware
+I/O and cancellation remain in `mouse_input.cpp`.
+
 The recognized keyboard marker is recorded, **not yet used to select hardware**.
 The first identified worker to acquire the configured helper's file lock gets
 input; other workers remain video-only. This prevents two viewers from driving
@@ -283,6 +340,7 @@ ctest --test-dir build/controlfloor --output-on-failure
 build/test-venv/bin/python controlfloor/tests/integration.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/mouse.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/keyboard.py build/controlfloor/uxplay
+build/test-venv/bin/python controlfloor/tests/navigation.py build/controlfloor/uxplay
 # About two minutes; exercises the real retry and heartbeat deadlines.
 build/test-venv/bin/python controlfloor/tests/reconnect.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/identification.py \

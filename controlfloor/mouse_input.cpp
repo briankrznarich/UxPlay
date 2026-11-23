@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "mouse_input.h"
+#include "navigation.h"
 #include <algorithm>
 #include <chrono>
 #include <cmath>
@@ -204,6 +205,107 @@ struct MouseInput::Impl {
                                                          "connection failed during typing");
                             }
                         }
+                    } else if (handlesNavigation(action)) {
+                        bool landscape = job.args.value("orientation", "portrait") != "portrait";
+                        int w = landscape ? height : width, h = landscape ? width : height;
+                        Navigation plan = navigationPlan(action, job.args, w, h);
+                        std::string endpoint;
+                        J body;
+                        if (!plan.key.empty() && consumerAvailable) {
+                            endpoint = "/typeSpecialKey";
+                            body = {{"key", plan.key}};
+                        } else if (!plan.shortcut.empty() && (keyboardAvailable || consumerAvailable)) {
+                            // Resolve the helper's current catalog, including local overrides.
+                            // Only fall back before submission, never after a failed POST.
+                            J catalog = call("/getKeyboardShortcuts");
+                            for (const auto &entry : catalog.at("shortcuts")) {
+                                if (entry.value("id", "") != plan.shortcut) continue;
+                                if (entry.value("disabled", false))
+                                    throw std::runtime_error("Keyboard shortcut is disabled: " + plan.shortcut);
+                                if (!entry.value("executable", false)) break;
+                                bool ready = true;
+                                for (const auto &key : entry.at("keys")) {
+                                    bool found = false;
+                                    for (const auto &definition : catalog.at("keys")) {
+                                        if (definition.at("name") != key) continue;
+                                        std::string kind = definition.at("kind");
+                                        if (kind == "consumer") ready &= consumerAvailable;
+                                        else if (kind == "key" || kind == "modifier") ready &= keyboardAvailable;
+                                        else throw std::runtime_error("Unsupported navigation shortcut key kind");
+                                        found = true;
+                                        break;
+                                    }
+                                    if (!found) throw std::runtime_error("Unknown key in navigation shortcut catalog");
+                                }
+                                if (ready && !entry.at("keys").empty()) {
+                                    endpoint = "/executeKeyboardShortcut";
+                                    body = {{"id", plan.shortcut}, {"revision", catalog.at("revision")}};
+                                }
+                                break;
+                            }
+                        }
+                        auto checkSession = [&] {
+                            std::lock_guard<std::mutex> l(mutex);
+                            if (!running || job.session != session)
+                                throw std::runtime_error("Navigation cancelled: input session changed");
+                        };
+                        checkSession();
+                        if (endpoint.empty() && (!available || plan.points.empty()))
+                            throw std::runtime_error("No ready HID key/shortcut or supported mouse fallback for " + plan.gesture);
+                        release();
+                        if (held) throw std::runtime_error("Could not release mouse before navigation");
+                        checkSession();
+                        if (!endpoint.empty()) {
+                            body["device"] = host;
+                            try {
+                                result.value = call(endpoint, body);
+                            } catch (const std::exception &e) {
+                                throw std::runtime_error(std::string("iphone-use navigation request failed: ") +
+                                    e.what() + "; not retried; no mouse fallback after submission");
+                            }
+                            result.value["inputMethod"] = "bluetoothKeyboard";
+                        } else {
+                            // A self-contained drag does not require enableLiveMouse.
+                            // The worker owns the entire sequence; other jobs cannot
+                            // interleave. Waits are cancellable; cleanup releases even
+                            // when a timeout leaves the last physical report uncertain.
+                            J geometry = {{"device", host}, {"width", w}, {"height", h},
+                                          {"orientation", job.args.value("orientation", "portrait")}};
+                            auto sendPoint = [&](const char *path, double x, double y) {
+                                checkSession();
+                                J move = geometry;
+                                move["x"] = x; move["y"] = y; move["button"] = 1;
+                                if (std::string(path) == "/mouseDown") held = true;
+                                J value = call(path, move);
+                                mouse = value.value("mouse", mouse);
+                                held = mouse.value("down", true);
+                            };
+                            auto pause = [&](double seconds) {
+                                std::unique_lock<std::mutex> l(mutex);
+                                if (wake.wait_for(l, std::chrono::duration<double>(seconds),
+                                                  [&] { return !running || job.session != session; }))
+                                    throw std::runtime_error("Navigation cancelled: input session changed");
+                            };
+                            const auto &start = plan.points.front();
+                            sendPoint("/mouseDown", start.x, start.y);
+                            for (size_t i = 1; i < plan.points.size(); ++i) {
+                                const auto &a = plan.points[i - 1], &b = plan.points[i];
+                                double duration = b.seconds - a.seconds;
+                                if (a.x == b.x && a.y == b.y) { pause(duration); continue; }
+                                int steps = std::max(1, static_cast<int>(std::ceil(duration / .05)));
+                                for (int step = 1; step <= steps; ++step) {
+                                    pause(duration / steps);
+                                    double t = static_cast<double>(step) / steps;
+                                    sendPoint("/mouseMove", a.x + (b.x - a.x) * t, a.y + (b.y - a.y) * t);
+                                }
+                            }
+                            checkSession();
+                            release();
+                            if (held) throw std::runtime_error("Could not confirm mouse release after navigation");
+                            result.value = {{"submitted", true}, {"inputMethod", "bluetoothMouse"},
+                                            {"mouse", mouse}, {"bluetoothHost", host}};
+                        }
+                        result.value["gesture"] = plan.gesture;
                     } else if (MouseInput::handlesKeyboard(action)) {
                         if (!keyboardAvailable && !consumerAvailable)
                             throw std::runtime_error("Bluetooth keyboard and consumer controls are not ready");
@@ -333,7 +435,7 @@ bool MouseInput::take(Result &result) {
     return true;
 }
 bool MouseInput::handles(const std::string &action) {
-    return handlesKeyboard(action) || handlesCatalog(action) || action == "enableLiveMouse" || action == "disableLiveMouse" ||
+    return handlesNavigation(action) || handlesKeyboard(action) || handlesCatalog(action) || action == "enableLiveMouse" || action == "disableLiveMouse" ||
            action == "mouseDown" || action == "mouseMove" || action == "mouseUp";
 }
 bool MouseInput::handlesText(const std::string &action) {
@@ -357,7 +459,12 @@ void MouseInput::submit(const Json &request, const Json &args) {
             throw std::runtime_error(std::string(field) + " must be a nonempty string of at most 128 bytes");
         return value;
     };
-    if (handlesText(action))
+    if (handlesNavigation(action)) {
+        for (auto key : {"gesture", "duration", "x", "y", "orientation", "modelName"})
+            if (args.contains(key)) clean[key] = args[key];
+        // Validate names/held-button requests on the worker with its current
+        // geometry; never forward arbitrary CF arguments to the helper.
+    } else if (handlesText(action))
         clean["text"] = checkedText(args);
     else if (action == "typeSpecialKey")
         clean["key"] = name(args.value("key", J()), "key");
