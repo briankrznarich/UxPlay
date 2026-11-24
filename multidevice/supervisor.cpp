@@ -3,6 +3,7 @@
 #include <gio/gio.h>
 #include <algorithm>
 #include <map>
+#include <deque>
 #include <cstring>
 #include <utility>
 
@@ -15,6 +16,7 @@ struct Supervisor::Impl {
         GCancellable *cancel = g_cancellable_new();
         std::vector<GSocketConnection *> waiting;
         std::string input;
+        std::deque<std::string> output;
         unsigned short port = 0;
         unsigned int connections = 0;
         gint64 created = g_get_monotonic_time();
@@ -161,6 +163,10 @@ struct Supervisor::Impl {
             worker->event.name = name;
             worker->event.model = model;
             emit(worker, "client");
+        } else if (!strcmp(type, "message")) {
+            worker->event.payload = id;
+            emit(worker, "message");
+            worker->event.payload.clear();
         } else if (!strcmp(type, "streaming")) {
             worker->streaming = true;
             emit(worker, "streaming");
@@ -231,6 +237,23 @@ struct Supervisor::Impl {
         return worker;
     }
 
+    static void written(GObject *source, GAsyncResult *result, gpointer data) {
+        std::unique_ptr<WorkerPtr> reference(static_cast<WorkerPtr *>(data));
+        WorkerPtr worker = *reference;
+        Impl *self = worker->owner;
+        self->pending--;
+        bool ok = g_output_stream_write_all_finish(G_OUTPUT_STREAM(source), result, NULL, NULL);
+        worker->output.pop_front();
+        if (!ok) self->stop_worker(worker);
+        if (!worker->stopping && !worker->output.empty()) self->write(worker);
+    }
+    void write(WorkerPtr worker) {
+        pending++;
+        const auto &line = worker->output.front();
+        g_output_stream_write_all_async(g_subprocess_get_stdin_pipe(worker->process),
+            line.data(), line.size(), G_PRIORITY_DEFAULT, worker->cancel, written, new WorkerPtr(worker));
+    }
+
     static gboolean incoming(GSocketService *, GSocketConnection *connection, GObject *, gpointer data) {
         Impl *self = static_cast<Impl *>(data);
         if (self->stopping) return FALSE;
@@ -298,7 +321,16 @@ bool Supervisor::start(std::string &message) {
     }
     impl->service = g_socket_service_new();
     GError *error = NULL;
-    if (impl->options.port) {
+    if (impl->options.ipv4_only) {
+        GInetAddress *address = g_inet_address_new_any(G_SOCKET_FAMILY_IPV4);
+        GSocketAddress *endpoint = g_inet_socket_address_new(address, impl->options.port), *bound = NULL;
+        if (g_socket_listener_add_address(G_SOCKET_LISTENER(impl->service), endpoint,
+                G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &bound, &error)) {
+            impl->listen_port = g_inet_socket_address_get_port(G_INET_SOCKET_ADDRESS(bound));
+            g_object_unref(bound);
+        }
+        g_object_unref(endpoint); g_object_unref(address);
+    } else if (impl->options.port) {
         if (g_socket_listener_add_inet_port(G_SOCKET_LISTENER(impl->service), impl->options.port, NULL, &error)) {
             impl->listen_port = impl->options.port;
         }
@@ -330,6 +362,22 @@ bool Supervisor::disconnect(const std::string &session_id) {
             impl->stop_worker(entry.second);
             return true;
         }
+    }
+    return false;
+}
+
+bool Supervisor::send(const std::string &session_id, const std::string &payload) {
+    if (payload.size() > 4096) return false;
+    for (const auto &entry : impl->workers) {
+        auto worker = entry.second;
+        if (worker->event.session_id != session_id || worker->stopping) continue;
+        if (worker->output.size() >= 16) return false;
+        GVariant *record = g_variant_ref_sink(g_variant_new("(s)", payload.c_str()));
+        gchar *line = g_variant_print(record, TRUE);
+        worker->output.push_back(std::string(line) + "\n");
+        g_free(line); g_variant_unref(record);
+        if (worker->output.size() == 1) impl->write(worker);
+        return true;
     }
     return false;
 }

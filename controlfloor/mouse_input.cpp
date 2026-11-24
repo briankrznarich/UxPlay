@@ -42,9 +42,9 @@ struct MouseInput::Impl {
     std::mutex mutex;
     std::condition_variable wake;
     std::thread worker;
-    bool running = false;
+    bool running = false, processing = false;
     unsigned long session = 0;
-    std::string url;
+    std::string url, selectedHost;
     std::deque<Job> jobs;
     std::deque<Result> results;
     J published = {{"available", false},
@@ -82,7 +82,7 @@ struct MouseInput::Impl {
         bool available = false, keyboardAvailable = false, consumerAvailable = false, enabled = false, held = false;
         int width = 375, height = 667;
         J mouse = J::object();
-        unsigned long observed = 0;
+        unsigned long observed = 0, probeSequence = 0;
         auto probeAt = Clock::time_point::min();
         auto release = [&] {
             if (held && !host.empty()) {
@@ -108,6 +108,7 @@ struct MouseInput::Impl {
                 if (!jobs.empty()) {
                     job = std::move(jobs.front());
                     jobs.pop_front();
+                    processing = true;
                 }
             }
             if (reset) {
@@ -118,6 +119,12 @@ struct MouseInput::Impl {
             if (Clock::now() >= probeAt) {
                 try {
                     J hosts = call("/devices").at("bluetoothHosts");
+                    if (!selectedHost.empty() && hosts.is_array()) {
+                        J selected = J::array();
+                        for (const auto &candidate : hosts)
+                            if (candidate.value("bluetoothHost", "") == selectedHost) selected.push_back(candidate);
+                        hosts = std::move(selected);
+                    }
                     if (!hosts.is_array() || hosts.size() != 1)
                         throw std::runtime_error("Exactly one Bluetooth phone must be connected");
                     std::string found = hosts[0].at("bluetoothHost").get<std::string>();
@@ -153,6 +160,7 @@ struct MouseInput::Impl {
                     width = static_cast<int>(std::min(w, h));
                     height = static_cast<int>(std::max(w, h));
                     error = available ? "" : "Bluetooth mouse is not ready";
+                    ++probeSequence;
                     if (!enabled)
                         release();
                 } catch (const std::exception &e) {
@@ -328,7 +336,16 @@ struct MouseInput::Impl {
                     } else {
                         if (!available)
                             throw std::runtime_error(error.empty() ? "Bluetooth mouse unavailable" : error);
-                        if (action == "enableLiveMouse") {
+                        if (action == "clickMouseButton") {
+                            release();
+                            if (held) throw std::runtime_error("Could not release mouse before button click");
+                            held = true;
+                            J body = {{"device", host}, {"button", job.args.value("button", 1)}};
+                            mouse = call("/mouseDown", body).value("mouse", mouse);
+                            mouse = call("/mouseUp", body).value("mouse", mouse);
+                            held = mouse.value("down", false);
+                            if (held) throw std::runtime_error("Could not confirm mouse click release");
+                        } else if (action == "enableLiveMouse") {
                             release();
                             if (held)
                                 throw std::runtime_error("Could not confirm mouse release");
@@ -363,11 +380,12 @@ struct MouseInput::Impl {
                 std::lock_guard<std::mutex> l(mutex);
                 if (job.session == session)
                     results.push_back(std::move(result));
+                processing = false;
             }
             {
                 std::lock_guard<std::mutex> l(mutex);
                 if (observed == session)
-                    published = {{"available", available},
+                    published = {{"probeSequence", probeSequence}, {"available", available},
                                  {"keyboardAvailable", keyboardAvailable},
                                  {"consumerControlsAvailable", consumerAvailable},
                                  {"enabled", enabled},
@@ -385,11 +403,12 @@ MouseInput::MouseInput() : impl(new Impl) {}
 MouseInput::~MouseInput() {
     stop();
 }
-void MouseInput::start(const std::string &url) {
+void MouseInput::start(const std::string &url, const std::string &host) {
     if (url.empty())
         return;
     stop();
     impl->url = url;
+    impl->selectedHost = host;
     while (!impl->url.empty() && impl->url.back() == '/')
         impl->url.pop_back();
     impl->running = true;
@@ -422,6 +441,10 @@ void MouseInput::reset() {
     }
     impl->wake.notify_all();
 }
+bool MouseInput::idle() {
+    std::lock_guard<std::mutex> l(impl->mutex);
+    return !impl->processing && impl->jobs.empty();
+}
 MouseInput::Json MouseInput::state() {
     std::lock_guard<std::mutex> l(impl->mutex);
     return impl->published;
@@ -436,7 +459,7 @@ bool MouseInput::take(Result &result) {
 }
 bool MouseInput::handles(const std::string &action) {
     return handlesNavigation(action) || handlesKeyboard(action) || handlesCatalog(action) || action == "enableLiveMouse" || action == "disableLiveMouse" ||
-           action == "mouseDown" || action == "mouseMove" || action == "mouseUp";
+           action == "mouseDown" || action == "mouseMove" || action == "mouseUp" || action == "clickMouseButton";
 }
 bool MouseInput::handlesText(const std::string &action) {
     return action == "typeText" || action == "tapText";

@@ -21,6 +21,12 @@ namespace multidevice {
 static FILE *events = NULL;
 static std::mutex event_mutex;
 static std::atomic<bool> video_active(false);
+static std::mutex command_mutex;
+static std::function<void(const std::string &)> command_handler;
+void worker_command_handler(std::function<void(const std::string &)> handler) {
+    std::lock_guard<std::mutex> lock(command_mutex);
+    command_handler = std::move(handler);
+}
 
 bool worker_enabled() {
     return g_getenv("UXPLAY_WORKER_PEER") != NULL;
@@ -29,11 +35,21 @@ bool worker_enabled() {
 static gpointer watch_parent(gpointer) {
     // The supervisor owns this pipe. EOF also handles a killed/crashed parent.
     // Process exit releases the sockets even before GStreamer's loop exists.
-    char command[32];
+    char command[16384];
     while (fgets(command, sizeof(command), stdin)) {
         if (!strcmp(command, "STOP\n")) {
             exit(EXIT_SUCCESS);
         }
+        if (!strchr(command, '\n')) exit(EXIT_FAILURE);
+        GVariant *record = g_variant_parse(G_VARIANT_TYPE("(s)"), command, NULL, NULL, NULL);
+        if (!record) exit(EXIT_FAILURE);
+        const char *payload;
+        g_variant_get(record, "(&s)", &payload);
+        {
+            std::lock_guard<std::mutex> lock(command_mutex);
+            if (command_handler) command_handler(payload);
+        }
+        g_variant_unref(record);
     }
     exit(EXIT_SUCCESS);
     return NULL;

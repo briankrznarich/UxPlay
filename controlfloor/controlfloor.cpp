@@ -2,6 +2,7 @@
 #include "controlfloor.h"
 #include "mouse_input.h"
 #include "identity.h"
+#include "pairing.h"
 #include <sys/file.h>
 #include <algorithm>
 #include <atomic>
@@ -38,7 +39,8 @@ std::atomic<bool> connected{false};
 std::atomic<unsigned long> connectionRevision{0};
 unsigned long sampleConnection = 0, sampleSequence = 0;
 struct Options {
-    bool enabled = false, insecure = false, registration = false, test = false;
+    bool enabled = false, insecure = false, registration = false, test = false, lan = false;
+    controlfloor::PairingOptions pairing;
     std::string server, config, mouseURL, logDirectory = "log";
     double ocrInterval = 5;
 } opt;
@@ -61,6 +63,22 @@ std::atomic<unsigned long> captured{0}, encodeAttempts{0}, encodeFailures{0};
 int nativeWidth = 0, nativeHeight = 0;
 J settings;
 controlfloor::MouseInput mouseInput;
+std::unique_ptr<controlfloor::PairingCoordinator> coordinator;
+void (*pairingTransport)(const char *) = nullptr;
+std::mutex pairingMutex;
+std::deque<J> pairingMessages;
+J binding = J::object(); // Network thread only.
+J remoteInput = J::object();
+void pairingSend(J message) {
+    message["connection"] = connectionRevision.load();
+    if (pairingTransport) pairingTransport(message.dump().c_str());
+}
+void resetInput() {
+    mouseInput.reset();
+    if (opt.lan) pairingSend({{"type","reset-input"}});
+}
+J inputState() { return opt.lan ? remoteInput : mouseInput.state(); }
+
 J mouseState = {{"available", false},
                 {"enabled", false},
                 {"logicalWidthPortrait", 375},
@@ -166,7 +184,7 @@ std::string currentGeneration() {
     return generation;
 }
 J capabilities() {
-    J input = mouseInput.state();
+    J input = inputState();
     bool keyboard = active && input.value("keyboardAvailable", false);
     bool consumer = active && input.value("consumerControlsAvailable", false);
     // These compatibility flags mean tapText can be accepted immediately via
@@ -736,6 +754,7 @@ void network() {
     unsigned long observedEpoch = 0;
     int frameID = 0, lastAck = 0;
     std::map<int, Clock::time_point> flights;
+    auto pairingStatusAt = Clock::time_point::min();
     auto lastProbe = Clock::now(), budgetAt = Clock::now(), blockedAt = Clock::now();
     double budget = 0;
     bool wasBlocked = false;
@@ -754,7 +773,7 @@ void network() {
         } else if (m->type == ix::WebSocketMessageType::Close || m->type == ix::WebSocketMessageType::Error) {
             online = false;
             serverConfirmed = false;
-            mouseInput.reset();
+            resetInput();
             if (m->type == ix::WebSocketMessageType::Close) {
                 std::string message = "provider WebSocket closed (code " + std::to_string(m->closeInfo.code) +
                     (m->closeInfo.remote ? ", remote)" : ", local)");
@@ -796,7 +815,7 @@ void network() {
             cfSocket.stop();
             online = false;
             mouseInput.stop();
-            mouseInput.reset();
+            resetInput();
             deviceLease.release(); inputLease.release();
             forwarding = false; screenshotDemand = false; screenshot = nullptr;
             flights.clear();
@@ -806,6 +825,35 @@ void network() {
             leaseWarning = false; claimAt = now;
             retry = now;
         }
+        if (opt.lan) {
+            std::deque<J> messages;
+            { std::lock_guard<std::mutex> l(pairingMutex); messages.swap(pairingMessages); }
+            for (const auto &message : messages) {
+                if (message.value("connection",0UL) != revision) continue;
+                std::string kind = message.value("type", "");
+                if (kind == "binding") {
+                    binding = message;
+                    remoteInput = message.value("input",J::object());
+                    identityGate.pairing(revision,message.value("token", ""),message.value("about",false));
+                } else if (kind == "input-result" && active && online) {
+                    send(reply(message.at("request"),message.value("value",J()),message.value("error", "")));
+                } else if (kind == "shortcut-progress" && active && online) {
+                    J progress = notice("ShortcutProgress",message.at("value"));
+                    for (auto key : {"cf","tag","events"})
+                        if (message.at("request").contains(key)) progress[key] = message.at("request")[key];
+                    send(progress);
+                } else if (kind == "revoke") {
+                    active = false; binding = J::object(); remoteInput = J::object(); cfSocket.stop();
+                }
+            }
+            if (now >= pairingStatusAt) {
+                J status = identityGate.progress(revision);
+                status["type"] = "status"; status["connected"] = connected.load();
+                status["providerConnected"] = active && online && serverConfirmed;
+                status["providerTransportOpen"] = active && online;
+                pairingSend(status); pairingStatusAt = now + std::chrono::milliseconds(250);
+            }
+        }
         if (connected && !active && revision == observedConnection && now >= claimAt) {
             controlfloor::Identity identity;
             bool ready = identityGate.ready(revision, identity);
@@ -814,6 +862,10 @@ void network() {
             if (opt.test) {
                 identity.serial = "test-12345"; identity.name = "synthetic-airplay-id";
                 identity.modelName = "Synthetic video"; ready = true;
+            }
+            if (opt.lan) {
+                ready = ready && binding.value("connection",0UL) == revision && binding.value("admit",false);
+                if (ready) identity.keyboard = binding.value("keyboard", "");
             }
             if (ready) {
                 std::lock_guard<std::mutex> session(lifecycleMutex);
@@ -827,7 +879,7 @@ void network() {
                     }
                     { std::lock_guard<std::mutex> l(stateMutex);
                       deviceID = id; identified = identity; phoneName = identity.name; phoneModel = airplayModel; }
-                    if (!opt.mouseURL.empty()) {
+                    if (!opt.lan && !opt.mouseURL.empty()) {
                         if (inputLease.acquire("input:" + opt.mouseURL)) mouseInput.start(opt.mouseURL);
                         else log("Input helper already assigned to another worker; this device is video-only");
                     }
@@ -837,7 +889,7 @@ void network() {
             }
         }
         {
-            J next = mouseInput.state();
+            J next = inputState();
             std::lock_guard<std::mutex> l(stateMutex);
             for (auto key : {"available", "keyboardAvailable", "consumerControlsAvailable", "enabled", "logicalWidthPortrait",
                              "logicalHeightPortrait", "error"})
@@ -850,7 +902,7 @@ void network() {
             identityGate.log("provider-heartbeat-timeout", {{"timeoutSeconds", 60}});
             online = false;
             cfSocket.stop();
-            mouseInput.reset();
+            resetInput();
             retry = now;
         }
         if (active && !online && now >= retry) {
@@ -938,7 +990,8 @@ void network() {
                 J args = request.value("args", J::object());
                 if (args.is_null())
                     args = J::object();
-                if (controlfloor::MouseInput::handles(action)) {
+                if (controlfloor::MouseInput::handles(action) || (opt.lan &&
+                    controlfloor::isShortcutRequest(request))) {
                     std::lock_guard<std::mutex> session(lifecycleMutex);
                     if (!active || revision != connectionRevision)
                         throw std::runtime_error("No identified AirPlay device connected");
@@ -949,7 +1002,12 @@ void network() {
                         args["orientation"] = nativeWidth > nativeHeight ? "landscapeLeft" : "portrait";
                         args["modelName"] = identified.modelName;
                     }
-                    mouseInput.submit(request, args);
+                    if (opt.lan) {
+                        J message={{"type","input"},{"request",request},{"args",args}};
+                        if (message.dump().size()>3500) throw std::runtime_error("Input request exceeds the LAN worker message limit");
+                        pairingSend(message);
+                    }
+                    else mouseInput.submit(request, args);
                 } else if (action == "getScreenshot") {
                     if (!active)
                         throw std::runtime_error("No AirPlay video connected");
@@ -1059,7 +1117,7 @@ void network() {
                     controlfloor::MouseInput::handles(request["action"]) &&
                     !controlfloor::MouseInput::handlesKeyboard(request["action"]) &&
                     !controlfloor::MouseInput::handlesCatalog(request["action"]))
-                    mouseInput.reset();
+                    resetInput();
                 send(reply(request, nullptr, e.what()));
             }
         }
@@ -1164,6 +1222,10 @@ extern "C" int cf_test_source() {
 }
 extern "C" void cf_help() {
     printf(
+        "--controlfloor-lan            Automatic IPv4 keyboard/shortcut pairing (requires -multi)\n"
+        "--controlfloor-keyboard-db F   Persistent keyboard registry (default: log/keyboards.sqlite3)\n"
+        "--controlfloor-shortcut-port N LAN HTTP port (default: 9876)\n"
+        "--controlfloor-shortcut-file F Serve signed ControlFloorLAN.shortcut\n"
         "--controlfloor-provider       OCR-identify AirPlay clients, then expose them to ControlFloor\n"
         "--controlfloor-log-dir DIR    Per-connection JSONL logs (default: log)\n"
         "--controlfloor-ocr-interval N  Seconds between OCR scans (default: 5)\n"
@@ -1179,7 +1241,10 @@ extern "C" int cf_option(int argc, char **argv, int *index) {
     std::string a = argv[*index];
     if (a.compare(0, 15, "--controlfloor-") != 0)
         return 0;
-    if (a == "--controlfloor-provider")
+    if (a == "--controlfloor-lan") {
+        opt.enabled = opt.lan = true;
+        if (opt.mouseURL.empty()) opt.mouseURL = "http://127.0.0.1:7390";
+    } else if (a == "--controlfloor-provider")
         opt.enabled = true;
     else if (a == "--controlfloor-mouse")
         opt.mouseURL = "http://127.0.0.1:7390";
@@ -1193,13 +1258,20 @@ extern "C" int cf_option(int argc, char **argv, int *index) {
         opt.test = true;
     } else if (a == "--controlfloor-server" || a == "--controlfloor-config" ||
                a == "--controlfloor-mouse-url" || a == "--controlfloor-log-dir" ||
-               a == "--controlfloor-ocr-interval") {
+               a == "--controlfloor-ocr-interval" || a == "--controlfloor-shortcut-port" ||
+               a == "--controlfloor-shortcut-file" || a == "--controlfloor-keyboard-db") {
         if (*index + 1 >= argc) {
             log("missing ControlFloor option value");
             exit(1);
         }
         std::string value = argv[++*index];
-        if (a == "--controlfloor-server")
+        if (a == "--controlfloor-keyboard-db") opt.pairing.database = value;
+        else if (a == "--controlfloor-shortcut-file") opt.pairing.artifact = value;
+        else if (a == "--controlfloor-shortcut-port") {
+            char *end = nullptr; long port = strtol(value.c_str(), &end, 10);
+            if (!end || *end || port < 1 || port > 65535) { log("Invalid LAN shortcut port"); exit(1); }
+            opt.pairing.port = static_cast<unsigned short>(port);
+        } else if (a == "--controlfloor-server")
             opt.server = value;
         else if (a == "--controlfloor-mouse-url")
             opt.mouseURL = value;
@@ -1250,7 +1322,7 @@ extern "C" int cf_start() {
             if (latest) frame.sample = gst_sample_ref(latest);
             frame.connection = sampleConnection; frame.sequence = sampleSequence;
             return frame;
-        });
+        }, opt.lan);
         running = true;
         encodeThread = std::thread([] {
             try {
@@ -1297,7 +1369,7 @@ extern "C" void cf_client(const char *id, const char *name, const char *model) {
     std::lock_guard<std::mutex> session(lifecycleMutex);
     active = false; connected = false;
     ++connectionRevision;
-    mouseInput.reset();
+    resetInput();
     invalidate();
     {
         std::lock_guard<std::mutex> l(stateMutex);
@@ -1315,7 +1387,7 @@ extern "C" void cf_disconnected() {
     if (!running) return;
     std::lock_guard<std::mutex> session(lifecycleMutex);
     connected = false; active = false; ++connectionRevision;
-    mouseInput.reset(); invalidate(); identityGate.end(); dirty = true;
+    resetInput(); invalidate(); identityGate.end(); dirty = true;
 }
 extern "C" void cf_attach(GstElement *pipeline) {
     if (!opt.enabled)
@@ -1327,4 +1399,24 @@ extern "C" void cf_attach(GstElement *pipeline) {
     cb.new_sample = capture;
     gst_app_sink_set_callbacks(GST_APP_SINK(sink), &cb, nullptr, nullptr);
     gst_object_unref(sink);
+}
+
+bool cf_lan_enabled() { return opt.lan; }
+bool cf_lan_start() {
+    if (!opt.lan) return true;
+    try {
+        opt.pairing.helper = opt.mouseURL; opt.pairing.directory = opt.logDirectory;
+        coordinator.reset(new controlfloor::PairingCoordinator(opt.pairing));
+        coordinator->start(); return true;
+    } catch (const std::exception &e) { log(e.what()); coordinator.reset(); return false; }
+}
+void cf_lan_stop() { if (coordinator) coordinator->stop(); coordinator.reset(); }
+controlfloor::PairingCoordinator *cf_lan_coordinator() { return coordinator.get(); }
+void cf_lan_worker_transport(void (*send)(const char *)) { pairingTransport = send; }
+void cf_lan_worker_message(const std::string &text) {
+    if (!opt.lan || text.size() > 4096) return;
+    J message = J::parse(text,nullptr,false);
+    if (!message.is_object()) return;
+    std::lock_guard<std::mutex> lock(pairingMutex);
+    if (pairingMessages.size() < 64) pairingMessages.push_back(std::move(message));
 }

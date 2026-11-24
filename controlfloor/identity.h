@@ -40,13 +40,15 @@ class IdentityGate {
     using Snapshot = std::function<ScreenSample()>;
     IdentityGate();
     ~IdentityGate();
-    void start(const std::string &directory, double interval, Snapshot snapshot);
+    void start(const std::string &directory, double interval, Snapshot snapshot, bool managed = false);
     void stop();
     void opened();
     void begin(unsigned long connection, const std::string &id,
                const std::string &name, const std::string &model);
     void end();
     bool ready(unsigned long connection, Identity &identity);
+    void pairing(unsigned long connection, const std::string &token, bool about);
+    nlohmann::json progress(unsigned long connection);
     void log(const std::string &event, const nlohmann::json &detail = nullptr);
   private:
     struct Impl;

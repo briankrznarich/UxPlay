@@ -3,3 +3,6 @@ build/
 # Connection logs contain OCR/device identifiers. Provider credentials stay outside the repo.
 log/
 __pycache__/
+# Local keyboard registry (including SQLite journal files).
+*.sqlite3
+*.sqlite3-*

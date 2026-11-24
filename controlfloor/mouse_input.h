@@ -16,10 +16,11 @@ class MouseInput {
     };
     MouseInput();
     ~MouseInput();
-    void start(const std::string &url);
+    void start(const std::string &url, const std::string &host = "");
     void stop();
     void reset(); // Cancel queued input on phone/provider-session changes.
     Json state();
+    bool idle();
     bool take(Result &result);
     void submit(const Json &request, const Json &args);
     static bool handles(const std::string &action);

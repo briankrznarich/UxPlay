@@ -1,6 +1,8 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "controlfloor.h"
 #include "identity.h"
+#include "pairing.h"
+#include <mutex>
 #include <allheaders.h>
 #include <gst/app/gstappsrc.h>
 #include <gst/video/video.h>
@@ -8,6 +10,11 @@
 #include <cstdlib>
 #include <stdexcept>
 using J = nlohmann::json;
+static std::mutex outputMutex;
+static void line(const std::string &text) {
+    std::lock_guard<std::mutex> lock(outputMutex);
+    std::cout << text << std::endl;
+}
 int main(int argc, char **argv) {
     gst_init(nullptr, nullptr);
     try {
@@ -23,6 +30,7 @@ int main(int argc, char **argv) {
         for (int i = 1; i < argc; ++i)
             if (!cf_option(argc, argv, &i)) throw std::runtime_error("unknown harness option");
         if (cf_test_source()) throw std::runtime_error("Gate test must not bypass OCR");
+        if (cf_lan_enabled()) cf_lan_worker_transport([](const char *message) { line(std::string("pairing ")+message); });
         if (cf_start() != 0) return 1;
         GError *error = nullptr;
         std::string launch = "appsrc name=source is-live=true format=time ! ";
@@ -33,13 +41,14 @@ int main(int argc, char **argv) {
         cf_attach(pipeline);
         auto *src = gst_bin_get_by_name(GST_BIN(pipeline), "source");
         gst_element_set_state(pipeline, GST_STATE_PLAYING);
-        std::cout << "ready" << std::endl;
-        std::string line;
-        while (std::getline(std::cin, line)) {
-            auto command = J::parse(line);
+        line("ready");
+        std::string input;
+        while (std::getline(std::cin, input)) {
+            auto command = J::parse(input);
             std::string action = command.at("action");
             if (action == "quit") break;
-            if (action == "connect") {
+            if (action == "pairing") cf_lan_worker_message(command.at("message").dump());
+            else if (action == "connect") {
                 cf_connection_open();
                 std::string id = command.at("id");
                 cf_client(id.c_str(), "Test phone", "iPhone12,8");
@@ -64,7 +73,7 @@ int main(int argc, char **argv) {
                 pixDestroy(&rgb); gst_buffer_unmap(buffer, &map);
                 gst_app_src_push_buffer(GST_APP_SRC(src), buffer);
             } else throw std::runtime_error("unknown command");
-            std::cout << "ok" << std::endl;
+            line("ok");
         }
         cf_disconnected();
         gst_element_set_state(pipeline, GST_STATE_NULL);

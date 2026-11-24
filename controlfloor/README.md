@@ -308,6 +308,26 @@ network writer. ACK flow control uses a bounded two-frame window with recovery
 probes, rejects stale generation ACKs, and bounds the WebSocket output backlog.
 Slow clients cannot accumulate an unbounded history of frames.
 
+## Automatic LAN pairing
+
+The LAN listener also serves a keyboard dashboard at `http://127.0.0.1:9876/`.
+Its compact table lists known keyboards, pairing stages and live connection state, with manual
+Mouse 8, Pair Keyboard, Start Screen Mirroring, Reset & pause and auto-connect
+controls. Selecting an action executes it immediately; options/events expand under
+the row. Unpaired AirPlay connections appear in a table above the inventory.
+Preferences and remembered IP/identity survive restarts in
+`log/keyboards.sqlite3`; override with `--controlfloor-keyboard-db FILE`.
+SQLite development headers/libraries are required (`libsqlite3-dev` on Debian/
+Ubuntu; supplied by the macOS SDK). See the dashboard section of
+[LAN_PAIRING.md](LAN_PAIRING.md) for precise reset/resume behavior.
+
+Use `--controlfloor-lan` with `-multi` to enable the IPv4 shortcut server and
+per-keyboard startup coordinator. This mode replaces manual marker entry with a
+typed-token callback, matches AirPlay by source IPv4, and gates About OCR and
+ControlFloor admission on the startup sequence. The mirroring replay must finish
+by pressing Mouse 8. See [LAN_PAIRING.md](LAN_PAIRING.md) for setup, commands,
+under-the-hood sequencing, timeout behavior and tests.
+
 ## Implementation boundaries
 
 - `uxplay.cpp`: optional lifecycle/options hooks; the multi-device supervisor is
@@ -330,8 +350,9 @@ The frame callback only records caps and replaces a sample reference with a
 try-lock. RGB conversion/readback and OCR run on the OCR thread; JPEG encoding
 runs separately. Both consumers share the existing decode. No JPEG/network/ACK
 work or OCR is performed in the AirPlay callback. The supervisor never relays
-pixels. Private IPC for coordinator-driven pairing, shortcut callbacks and a
-real keyboard registry remain future work; see the development guide.
+pixels. In optional LAN mode, bounded private IPC carries coordinator state and input
+commands; it never carries pixels. `pairing.cpp` owns the callback listener and
+per-keyboard registry. See [LAN_PAIRING.md](LAN_PAIRING.md).
 
 ## Tests
 

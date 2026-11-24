@@ -22,6 +22,7 @@
 
 #ifdef ENABLE_CONTROLFLOOR
 #include "controlfloor/controlfloor.h"
+#include "controlfloor/pairing.h"
 #endif
 #include <stddef.h>
 #include <cstring>
@@ -3335,6 +3336,9 @@ static void stop_raop_server () {
 static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_addr) {
     multidevice::Options options;
     options.max_devices = multidevice_limit;
+#ifdef ENABLE_CONTROLFLOOR
+    options.ipv4_only = cf_lan_enabled();
+#endif
     options.port = tcp[1];
     for (int i = 0; i < argc; i++) options.arguments.push_back(argv[i]);
     // Resolve identity once, including random MAC and hostname suffix. All
@@ -3342,11 +3346,30 @@ static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_a
     options.arguments.insert(options.arguments.end(),
         {"-n", server_name, "-nh", "-m", mac_address});
     multidevice::Supervisor supervisor(options, [](const multidevice::Event &event) {
+#ifdef ENABLE_CONTROLFLOOR
+        if (auto coordinator = cf_lan_coordinator())
+            coordinator->event(event.type,event.session_id,event.peer,event.payload);
+#endif
+        if (event.type == "message") return;
         LOGI("Multi-device %s: session=%s peer=%s device=%s name=%s model=%s",
              event.type.c_str(), event.session_id.c_str(), event.peer.c_str(),
              event.device_id.c_str(), event.name.c_str(), event.model.c_str());
         fflush(stdout);
     });
+#ifdef ENABLE_CONTROLFLOOR
+    if (!cf_lan_start()) return 1;
+    guint pairing_timer = g_timeout_add(25, [](gpointer data) -> gboolean {
+        auto supervisor = static_cast<multidevice::Supervisor *>(data);
+        if (auto coordinator = cf_lan_coordinator()) {
+            controlfloor::PairingOutput output;
+            while (coordinator->take(output)) {
+                if (output.disconnect || !supervisor->send(output.worker,output.message.dump()))
+                    supervisor->disconnect(output.worker);
+            }
+        }
+        return G_SOURCE_CONTINUE;
+    }, &supervisor);
+#endif
     // The supervisor has no renderer. RAOP initialization supplies the public
     // key and discovery metadata, but only the supervisor accepts connections.
     use_audio = use_video = false;
@@ -3385,6 +3408,10 @@ static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_a
     }
     if (!error.empty()) LOGE("Multi-device startup failed: %s", error.c_str());
     unregister_dnssd();
+#ifdef ENABLE_CONTROLFLOOR
+    g_source_remove(pairing_timer);
+    cf_lan_stop();
+#endif
     supervisor.stop();
     stop_raop_server();
     stop_dnssd();
@@ -3569,6 +3596,19 @@ int main (int argc, char *argv[]) {
     }
     parse_arguments (argc, argv);
 #ifdef ENABLE_CONTROLFLOOR
+    if (cf_lan_enabled()) {
+#ifdef ENABLE_MULTIDEVICE
+        if ((!multidevice_limit && !multidevice::worker_enabled()) || cf_test_source()) {
+            fprintf(stderr,"--controlfloor-lan requires -multi and real AirPlay workers\n"); exit(1);
+        }
+        if (multidevice::worker_enabled()) {
+            cf_lan_worker_transport([](const char *message) { multidevice::worker_event("message",message); });
+            multidevice::worker_command_handler(cf_lan_worker_message);
+        }
+#else
+        fprintf(stderr,"--controlfloor-lan requires ENABLE_MULTIDEVICE\n"); exit(1);
+#endif
+    }
     int prepared = cf_prepare();
     if (prepared != 0) exit(prepared > 0 ? 0 : 1);
     if (cf_enabled() && (!use_video || !rtp_pipeline.empty() || hls_support || mux_to_file)) {

@@ -16,6 +16,10 @@ static gboolean command(gpointer data) {
     std::unique_ptr<Command> request(static_cast<Command *>(data));
     if (request->line.compare(0, 5, "DROP ") == 0) {
         request->control->supervisor->disconnect(request->line.substr(5));
+    } else if (request->line.compare(0, 5, "SEND ") == 0) {
+        size_t separator = request->line.find(' ', 5);
+        if (separator != std::string::npos)
+            request->control->supervisor->send(request->line.substr(5, separator-5), request->line.substr(separator+1));
     } else {
         g_main_loop_quit(request->control->loop);
     }
@@ -23,7 +27,7 @@ static gboolean command(gpointer data) {
 }
 static gpointer input(gpointer data) {
     Control *control = static_cast<Control *>(data);
-    char line[256];
+    char line[8192];
     while (fgets(line, sizeof(line), stdin)) {
         line[strcspn(line, "\r\n")] = 0;
         g_main_context_invoke(NULL, command, new Command{control, line});
@@ -42,6 +46,7 @@ int main(int argc, char **argv) {
     GMainLoop *loop = g_main_loop_new(NULL, FALSE);
     multidevice::Supervisor supervisor(options, [](const multidevice::Event &event) {
         printf("EVENT %s %s %s\n", event.type.c_str(), event.session_id.c_str(), event.peer.c_str());
+        if (event.type == "message") printf("PAYLOAD %s\n", event.payload.c_str());
         fflush(stdout);
     });
     std::string error;

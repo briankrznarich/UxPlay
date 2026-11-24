@@ -191,7 +191,9 @@ struct IdentityGate::Impl {
     std::mutex mutex;
     std::condition_variable wake;
     std::thread worker;
-    bool running = false;
+    bool running = false, managed = false, allowAbout = false;
+    std::string expectedToken;
+    J airplay = J::object();
     enum Stage { Idle, Keyboard, About, Ready } stage = Idle;
     unsigned long connection = 0, keyboardFrame = 0;
     std::string directory, path, suffix, candidate;
@@ -224,7 +226,8 @@ struct IdentityGate::Impl {
         ScreenReader reader;
         std::unique_lock<std::mutex> lock(mutex);
         while (running) {
-            wake.wait(lock, [&] { return !running || stage == Keyboard || stage == About; });
+            wake.wait(lock, [&] { return !running || (stage == Keyboard && (!managed || !expectedToken.empty())) ||
+                (stage == About && (!managed || allowAbout)); });
             if (!running) break;
             auto token = connection;
             auto expected = stage;
@@ -240,14 +243,14 @@ struct IdentityGate::Impl {
             if (frame.sample) gst_sample_unref(frame.sample);
             lock.lock();
             if (!running) break;
-            if (token != connection || expected != stage) continue;
+            if (token != connection || expected != stage || (managed && expected == About && !allowAbout)) continue;
             if (!error.empty()) log("ocr-error", error);
             else if (!result.text.empty()) {
                 log("ocr", {{"stage", stage == Keyboard ? "keyboard" : "about"}, {"text", result.text},
                      {"milliseconds", std::chrono::duration_cast<std::chrono::milliseconds>(Clock::now() - started).count()}});
                 if (stage == Keyboard) {
                     auto keyboard = keyboardID(result);
-                    if (!keyboard.empty()) {
+                    if (!keyboard.empty() && (!managed || keyboard == expectedToken)) {
                         identity.keyboard = keyboard;
                         keyboardFrame = frame.sequence;
                         stage = About;
@@ -281,7 +284,8 @@ struct IdentityGate::Impl {
 };
 IdentityGate::IdentityGate() : impl(new Impl) {}
 IdentityGate::~IdentityGate() { stop(); }
-void IdentityGate::start(const std::string &directory, double interval, Snapshot snapshot) {
+void IdentityGate::start(const std::string &directory, double interval, Snapshot snapshot, bool managed) {
+    impl->managed = managed;
     // Fail startup immediately if the language data is unavailable.
     { ScreenReader probe; }
     if (g_mkdir_with_parents(directory.c_str(), 0700) != 0)
@@ -317,12 +321,14 @@ void IdentityGate::begin(unsigned long connection, const std::string &id,
     fprintf(stderr, "ControlFloor connection log: %s\n", impl->path.c_str());
     impl->connection = connection; impl->stage = Impl::Keyboard;
     impl->identity = Identity(); impl->candidate.clear(); impl->keyboardFrame = 0;
-    impl->log("airplay-client", {{"id", id}, {"name", name}, {"model", model}});
+    impl->expectedToken.clear(); impl->allowAbout = false;
+    impl->airplay = {{"id", id}, {"name", name}, {"model", model}};
+    impl->log("airplay-client", impl->airplay);
     impl->wake.notify_all();
 }
 void IdentityGate::end() {
     std::lock_guard<std::mutex> lock(impl->mutex);
-    impl->stage = Impl::Idle; ++impl->connection;
+    impl->stage = Impl::Idle; ++impl->connection; impl->airplay = J::object();
     impl->log("connection-closed"); impl->closeLog();
     impl->wake.notify_all();
 }
@@ -330,6 +336,24 @@ bool IdentityGate::ready(unsigned long connection, Identity &identity) {
     std::lock_guard<std::mutex> lock(impl->mutex);
     if (impl->stage != Impl::Ready || impl->connection != connection) return false;
     identity = impl->identity; return true;
+}
+void IdentityGate::pairing(unsigned long connection, const std::string &token, bool about) {
+    std::lock_guard<std::mutex> lock(impl->mutex);
+    if (!impl->managed || impl->connection != connection) return;
+    if (impl->expectedToken != token) {
+        impl->expectedToken = token;
+        impl->identity = Identity(); impl->candidate.clear();
+        impl->identity.keyboard = token;
+        impl->stage = token.empty() ? Impl::Keyboard : Impl::About;
+    }
+    if (about && !impl->allowAbout) impl->candidate.clear();
+    impl->allowAbout = about;
+    impl->wake.notify_all();
+}
+nlohmann::json IdentityGate::progress(unsigned long connection) {
+    std::lock_guard<std::mutex> lock(impl->mutex);
+    if (impl->connection != connection) return J::object();
+    return {{"identity", impl->identity.json()}, {"ready", impl->stage == Impl::Ready}, {"airplay",impl->airplay}};
 }
 void IdentityGate::log(const std::string &event, const J &detail) {
     std::lock_guard<std::mutex> lock(impl->mutex); impl->log(event, detail);

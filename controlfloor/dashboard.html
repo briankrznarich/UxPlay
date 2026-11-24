@@ -1,0 +1,142 @@
+<!doctype html>
+<!-- SPDX-License-Identifier: GPL-3.0-or-later -->
+<html lang="en">
+<head>
+<meta charset="utf-8"><meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Keyboards · UxPlay</title>
+<style>
+:root{color-scheme:dark;--bg:#10171e;--panel:#1a252f;--line:#354450;--muted:#adc0cc;--text:#f1f6f9;--accent:#89dfba;--warn:#ffd498}*{box-sizing:border-box}[hidden]{display:none!important}body{margin:0;background:var(--bg);color:var(--text);font:13px/1.4 system-ui,-apple-system,sans-serif}main{margin:auto;padding:22px 20px;max-width:2200px}header,.section-heading,.toolbar{display:flex;justify-content:space-between;align-items:center;gap:16px}.eyebrow{letter-spacing:.1em;text-transform:uppercase;font-size:10px;font-weight:700;color:var(--accent)}h1{font-size:26px;letter-spacing:-.03em;margin:3px 0}h2{font-size:15px;margin:0}p{margin:5px 0 10px}.muted,small,.note{color:var(--muted)}.connection{font-size:12px;text-align:right;overflow-wrap:anywhere}#connection{color:var(--accent)}#connection.stale,.error{color:var(--warn)}.stats{display:flex;flex-wrap:wrap;gap:22px;padding:10px 0;margin:10px 0 18px;border-block:1px solid var(--line)}.stat strong{font-size:17px;margin-right:6px;font-weight:650}.stat span{color:var(--muted)}.section-heading{margin:0 0 8px}.section-heading small{font-size:12px;font-weight:400;margin-left:8px}.table-wrap{overflow:auto;border:1px solid var(--line);border-radius:8px;background:var(--panel)}table{width:100%;border-collapse:collapse;text-align:left;table-layout:fixed}th{color:var(--muted);font-size:11px;font-weight:650;background:#15212a;white-space:nowrap}th,td{padding:9px 10px;border-bottom:1px solid var(--line);vertical-align:middle}td{font-size:12px;overflow-wrap:anywhere}th[scope=row]{white-space:normal;background:transparent;color:inherit;font-weight:400;text-align:left}.keyboard-table{min-width:1184px}.keyboard-table th,.keyboard-table td{padding-inline:6px}.keyboard-table .details-row>td{padding:14px 20px}.ip,.serial,#unpaired-table .mono{white-space:nowrap}.keyboard-scroll{max-height:70vh}.keyboard-table thead th{position:sticky;top:0;z-index:1}.keyboard-row{height:76px}.keyboard-row:hover{background:#1e2d38}.keyboard-row td,.keyboard-row th{padding-top:8px;padding-bottom:8px}.auto-cell{text-align:center}.mono{font-family:ui-monospace,SFMono-Regular,monospace;font-size:11px}.host{display:block;overflow-wrap:anywhere;color:var(--text)}.device-label{display:block;font-weight:650;margin-bottom:3px}.device-label:empty{display:none}.sub{display:block;color:var(--muted);font-size:11px;margin-top:2px}.code{color:#b9dcf5;white-space:nowrap}.good{color:var(--accent)}.phase{display:block;font-size:11px;font-weight:650;color:var(--accent)}.phase.neutral{color:var(--muted)}.phase.warning{color:var(--warn)}.message,.error{display:-webkit-box;-webkit-box-orient:vertical;-webkit-line-clamp:2;overflow:hidden;font-size:11px;margin:3px 0 0}.message:empty,.error:empty{display:none}.error:not(:empty)~.message{display:none}input,select,button{font:inherit;color:inherit;background:#111c25;border:1px solid #556875;border-radius:5px;padding:6px 8px;min-height:32px}input:focus-visible,select:focus-visible,button:focus-visible,.table-wrap:focus-visible{outline:2px solid var(--accent);outline-offset:2px}input[type=checkbox]{accent-color:var(--accent);width:17px;min-height:17px;margin:0;cursor:pointer}button{cursor:pointer;background:#263b46;font-weight:600}button:hover:enabled{background:#35505d}button:disabled,select:disabled,input:disabled{opacity:.45;cursor:not-allowed}.action{width:100%;font-size:12px}.expand{padding:3px 0;margin-top:3px;min-height:24px;background:transparent;border:0;color:var(--muted);font-size:11px;text-align:left}.expand:hover:enabled{background:transparent;color:var(--text)}.details-row>td{padding:14px 20px;background:#14202a}.details-grid{display:grid;grid-template-columns:320px minmax(0,1fr);gap:28px}.label-form{display:flex;gap:8px;align-items:end}.label-form label{flex:1;min-width:0}.label-form input{width:100%;margin-top:4px}.full-status{white-space:pre-wrap;overflow-wrap:anywhere;margin:10px 0}.events{padding-left:20px;color:var(--muted);max-height:220px;overflow:auto;margin:6px 0}.events li{padding:3px 0;overflow-wrap:anywhere}.event-detail{display:block;font:11px/1.4 ui-monospace,monospace;color:#8fa8b8}.toolbar{margin:18px 0 10px}#search{width:340px;max-width:100%}.note{font-size:12px;margin:8px 0}.empty{padding:14px;color:var(--muted);text-align:center;margin:0}#unpaired-table{min-width:700px}#unpaired-table td{padding-block:8px}footer{margin-top:12px;font-size:11px;color:var(--muted);overflow-wrap:anywhere}#alert{color:var(--warn);margin:8px 0}#alert:empty{display:none}@media(max-width:700px){main{padding:16px 10px}header{display:block}.connection{text-align:left;margin-top:8px}.toolbar,.section-heading{align-items:flex-start;flex-wrap:wrap}#search{width:100%}.stats{gap:12px}.section-heading small{display:block;margin:3px 0}.details-grid{grid-template-columns:1fr}.keyboard-scroll{max-height:75vh}}
+</style>
+</head>
+<body><main>
+<header><div><div class="eyebrow">UxPlay / ControlFloor LAN</div><h1>Keyboards</h1></div><div class="connection"><div id="connection" role="status">Connecting to coordinator…</div><div id="helper" class="muted"></div></div></header>
+<div id="alert" role="alert"></div>
+<div class="stats" aria-label="Keyboard counts"><div class="stat"><strong id="known">0</strong><span>known</span></div><div class="stat"><strong id="present">0</strong><span>present</span></div><div class="stat"><strong id="paired">0</strong><span>IP bound</span></div><div class="stat"><strong id="connected">0</strong><span>in ControlFloor</span></div></div>
+<section aria-labelledby="unpaired-heading"><div class="section-heading"><h2 id="unpaired-heading">Unpaired AirPlay <small id="unpaired-count">Waiting for status</small></h2><span class="note">Connected streams with no current keyboard/IP binding.</span></div>
+<div class="table-wrap" tabindex="0" aria-label="Unpaired AirPlay connections"><table id="unpaired-table"><colgroup><col style="width:17%"><col style="width:24%"><col style="width:21%"><col style="width:16%"><col style="width:22%"></colgroup><thead><tr><th scope="col">Phone IP</th><th scope="col">Client name</th><th scope="col">AirPlay ID</th><th scope="col">Reported model</th><th scope="col">Connected since</th></tr></thead><tbody id="unpaired"></tbody></table><p id="unpaired-empty" class="empty">No unpaired AirPlay connections.</p></div></section>
+<div class="toolbar"><h2>Keyboard inventory <small id="visible-count" class="muted"></small></h2><input id="search" type="search" aria-label="Filter keyboards" placeholder="Find a keyboard, IP or device…"></div>
+<div class="table-wrap keyboard-scroll" tabindex="0" aria-label="Keyboard inventory; scroll horizontally for all columns"><table class="keyboard-table"><colgroup><col style="width:44px"><col style="width:172px"><col style="width:114px"><col style="width:90px"><col style="width:100px"><col style="width:78px"><col style="width:42px"><col style="width:70px"><col style="width:86px"><col style="width:80px"><col style="width:160px"><col style="width:148px"></colgroup><thead><tr><th scope="col">Auto</th><th scope="col">Keyboard ID / label</th><th scope="col">Phone IP</th><th scope="col">Pairing code</th><th scope="col">Serial number</th><th scope="col">Model</th><th scope="col">iOS</th><th scope="col">AirPlay</th><th scope="col">Input / capture</th><th scope="col">ControlFloor</th><th scope="col">Status</th><th scope="col">Action</th></tr></thead></table><p id="empty" class="empty" hidden>No keyboards yet. Waiting for iphone-use inventory.</p></div>
+<p class="note">Actions run immediately. Pair Keyboard stops at the IP callback; Start Screen Mirroring continues to ControlFloor. Inventory refreshes every second.</p>
+<footer id="storage"></footer>
+</main>
+<template id="keyboard"><tbody class="keyboard-entry"><tr class="keyboard-row">
+<td class="auto-cell"><input type="checkbox" class="automatic" aria-label="Auto-connect"></td>
+<th scope="row"><span class="device-label"></span><span class="host mono"></span><button class="expand" aria-expanded="false">▸ Options &amp; recent events</button></th>
+<td><span class="ip mono"></span><span class="ip-note sub"></span></td><td class="code mono"></td><td class="serial mono"></td><td class="model"></td><td class="ios"></td><td class="airplay"></td><td class="input"></td><td class="provider"></td>
+<td><span class="phase"></span><p class="message"></p><p class="error"></p></td>
+<td><select class="action" aria-label="Keyboard action"><option value="">Action…</option><option value="pair">Pair Keyboard</option><option value="mirror">Start Screen Mirroring</option><option value="mouse8">Mouse 8 — click once</option><option value="resume">Resume auto-connect</option><option value="reset">Reset &amp; pause</option></select></td></tr>
+<tr class="details-row" hidden><td colspan="12"><div class="details-grid"><div><form class="label-form"><label>Friendly label<input class="label" maxlength="80" placeholder="e.g. Shelf 2 · Phone 4"></label><button>Save</button></form><p class="full-status"></p><p class="mode note"></p><p class="identity-note note"></p><p class="note">Reset &amp; pause forgets the IP and device identity and turns auto-connect off. A remembered IP is not a live connection.</p></div><div><strong>Recent events</strong><ol class="events"></ol></div></div></td></tr></tbody></template>
+<script>
+'use strict';
+const $=id=>document.getElementById(id), keyboards=new Map();
+let snapshot=null, token='', online=false, nextDetailId=0;
+const phases={idle:'Uninitialized',remembered:'Saved binding',failed:'Retry / attention',paired:'Keyboard paired',starting:'Opening shortcut','prompt-delay':'Waiting for prompt','typing-token':'Typing pairing code','awaiting-initial-report':'Waiting for IP callback','starting-replay':'Starting mirroring','waiting-for-airplay':'Waiting for AirPlay / About','reading-about':'Reading device identity','going-home':'Finishing setup','connecting-to-controlfloor':'Connecting to ControlFloor','connected-to-controlfloor':'Connected to ControlFloor',shortcut:'Running shortcut',offline:'Keyboard offline'};
+function text(node,selector,value){const element=node.querySelector(selector);if(element.textContent!==value)element.textContent=value;}
+async function command(view, action, extra={}){
+  if(view.busy||!online)return;
+  view.busy=true;view.error='';
+  if(Object.hasOwn(extra,'autoConnect'))view.autoPending=extra.autoConnect;
+  render();
+  try{
+    const response=await fetch('/api/keyboards/control',{method:'POST',headers:{'Content-Type':'application/json','X-UxPlay-Token':token},body:JSON.stringify({id:view.id,action,...extra}),signal:AbortSignal.timeout(8000)});
+    const body=await response.json();if(!response.ok)throw Error(body.error||`HTTP ${response.status}`);
+    if(Object.hasOwn(extra,'label'))view.labelDirty=false;
+    view.notice=action==='settings'?'Settings saved.':'Action accepted.';
+  }catch(error){view.error=error.message;view.notice='';delete view.autoPending;}
+  finally{view.busy=false;await poll();render();}
+}
+function create(row){
+  const node=$('keyboard').content.firstElementChild.cloneNode(true), view={id:row.id,node,busy:false,error:'',notice:'',events:'',labelDirty:false,expanded:false};
+  const details=node.querySelector('.details-row'), expand=node.querySelector('.expand');
+  details.id=`keyboard-details-${nextDetailId++}`;expand.setAttribute('aria-controls',details.id);
+  expand.addEventListener('click',()=>{view.expanded=!view.expanded;details.hidden=!view.expanded;expand.setAttribute('aria-expanded',String(view.expanded));expand.textContent=`${view.expanded?'▾':'▸'} Options & recent events`;renderEvents(view,view.row);});
+  node.querySelector('.automatic').setAttribute('aria-label',`Auto-connect ${row.id}`);
+  node.querySelector('.automatic').addEventListener('change',event=>command(view,'settings',{autoConnect:event.target.checked}));
+  const select=node.querySelector('.action');select.setAttribute('aria-label',`Action for ${row.id}`);
+  select.addEventListener('change',()=>{const action=select.value;select.value='';if(action)command(view,action);});
+  node.querySelector('.label').addEventListener('input',()=>{view.labelDirty=true;});
+  node.querySelector('.label-form').addEventListener('submit',event=>{event.preventDefault();command(view,'settings',{label:node.querySelector('.label').value});});
+  document.querySelector('.keyboard-table').append(node);keyboards.set(row.id,view);return view;
+}
+function renderEvents(view,row){
+  if(!view.expanded||!row)return;
+  const history=JSON.stringify(row.history);if(history===view.events)return;view.events=history;
+  const list=view.node.querySelector('.events');list.replaceChildren();
+  for(const event of [...row.history].reverse()){
+    const item=document.createElement('li');item.textContent=`${new Date(event.time).toLocaleTimeString()} · ${event.event}`;
+    if(event.detail!==null){const detail=document.createElement('span');detail.className='event-detail';detail.textContent=typeof event.detail==='string'?event.detail:JSON.stringify(event.detail);item.append(detail);}list.append(item);
+  }
+  if(!row.history.length){const item=document.createElement('li');item.textContent='No events in this server session.';list.append(item);}
+}
+let unpairedMarkup='';
+function renderUnpaired(){
+  const rows=snapshot.unpairedAirplay||[];
+  $('unpaired-count').textContent=online?`${rows.length} ${rows.length===1?'connection':'connections'}`:'Status unavailable';
+  $('unpaired-empty').hidden=rows.length>0;
+  $('unpaired-empty').textContent=online?'No unpaired AirPlay connections.':'Connection status unavailable.';
+  const signature=JSON.stringify([online,rows]);if(signature===unpairedMarkup)return;unpairedMarkup=signature;
+  $('unpaired').replaceChildren();
+  for(const row of rows){
+    const tr=document.createElement('tr');
+    for(const [i,value] of [row.ip,row.clientName||'—',row.clientId||'—',row.model||'—',row.connectedAt?new Date(row.connectedAt).toLocaleString():'—'].entries()){
+      const td=document.createElement('td');td.textContent=value;if(i===0||i===2)td.className='mono';tr.append(td);
+    }
+    if(!online)tr.title='Last known snapshot; connection not verified';
+    $('unpaired').append(tr);
+  }
+}
+function render(){
+  if(!snapshot)return;
+  const query=$('search').value.toLowerCase();let visible=0;
+  const ids=new Set(snapshot.keyboards.map(row=>row.id));
+  for(const [id,view] of keyboards)if(!ids.has(id)){view.node.remove();keyboards.delete(id);}
+  for(const row of snapshot.keyboards){
+    const view=keyboards.get(row.id)||create(row), node=view.node;view.row=row;
+    node.hidden=!JSON.stringify([row.id,row.label,row.ip,row.savedIP,row.identity,row.metadata]).toLowerCase().includes(query);
+    if(!node.hidden)visible++;
+    const identity=row.identity||{}, meta=row.metadata||{};
+    text(node,'.device-label',row.label||identity.name||'');text(node,'.host',row.id);
+    const phase=online?row.displayPhase:'status-unavailable', phaseLabel=online?(phases[phase]||phase):'Status unavailable';
+    text(node,'.phase',phaseLabel);
+    node.querySelector('.phase').className='phase '+(!online||phase==='failed'?'warning':phase==='offline'||phase==='idle'||phase==='remembered'?'neutral':'');
+    if(!view.busy&&row.autoConnect===view.autoPending)delete view.autoPending;
+    const checkbox=node.querySelector('.automatic');checkbox.checked=view.autoPending??row.autoConnect;checkbox.disabled=view.busy||!online;
+    text(node,'.mode',!row.autoConnect?'Manual controls only':row.manualHold?'Automatic startup paused by a manual action. Use Resume auto-connect.':'Automatic pairing enabled');
+    text(node,'.ip',row.ip||row.savedIP||'—');text(node,'.ip-note',row.ip?(row.bindingVerified?'Bound':'Resuming'):row.savedIP?'Remembered':'Unpaired');
+    text(node,'.code',row.pairingCode||'—');text(node,'.serial',identity.serialNumber||'—');
+    text(node,'.model',identity.modelName||meta.model||'—');text(node,'.ios',identity.osVersion||meta.iosVersion||'—');
+    text(node,'.airplay',online?(row.airplayConnected?'Connected':'—'):'Unknown');node.querySelector('.airplay').classList.toggle('good',online&&row.airplayConnected);
+    text(node,'.provider',online?(row.providerConnected?'Connected':row.providerTransportOpen?'Confirming':'—'):'Unknown');node.querySelector('.provider').classList.toggle('good',online&&row.providerConnected);
+    text(node,'.input',online?`${row.inputReady?'Ready':'Unavailable'} / ${row.captureState||'unknown'}`:'Unknown');
+    const select=node.querySelector('.action');for(const option of select.options)option.disabled=!!option.value&&!row.actions[option.value];select.disabled=view.busy||!online;
+    const message=view.busy?'Sending…':row.pendingAction?`Queued: ${row.pendingAction}`:row.retryIn>0?`Retrying in ${Math.ceil(row.retryIn)} seconds`:row.manualHold&&row.autoConnect?'Automatic startup paused':row.operation||view.notice||'';
+    const error=view.error||row.error||'';text(node,'.message',message);text(node,'.error',error);
+    node.querySelector('.message').title=message;node.querySelector('.error').title=error;
+    text(node,'.full-status',[phaseLabel,message,error].filter(Boolean).join('\n'));
+    text(node,'.identity-note',[`Source: ${row.source}`,identity.name&&`Device: ${identity.name}`,identity.modelNumber&&`Model number: ${identity.modelNumber}`,row.lastSeen&&`Last seen: ${new Date(row.lastSeen).toLocaleString()}`].filter(Boolean).join(' · '));
+    const label=node.querySelector('.label');if(!view.labelDirty&&document.activeElement!==label&&!view.busy)label.value=row.label;
+    node.querySelector('.label-form button').disabled=view.busy||!online;
+    renderEvents(view,row);
+  }
+  $('empty').hidden=visible>0;$('empty').textContent=snapshot.keyboards.length?'No keyboards match your search.':'No keyboards yet. Waiting for iphone-use inventory.';
+  $('visible-count').textContent=query?`· ${visible} shown`:'';
+  $('known').textContent=snapshot.keyboards.length;
+  $('present').textContent=online?snapshot.keyboards.filter(k=>k.present).length:'—';
+  $('paired').textContent=online?snapshot.keyboards.filter(k=>k.bindingVerified).length:'—';
+  $('connected').textContent=online?snapshot.keyboards.filter(k=>k.providerConnected).length:'—';
+  renderUnpaired();
+}
+let polling=false;
+async function poll(){
+  if(polling)return;polling=true;
+  try{
+    const response=await fetch('/api/keyboards',{cache:'no-store',signal:AbortSignal.timeout(5000)});if(!response.ok)throw Error(`HTTP ${response.status}`);
+    snapshot=await response.json();token=snapshot.mutationToken;online=true;
+    $('connection').textContent=snapshot.inventoryError?'Coordinator online · inventory unavailable':'Coordinator online · refreshing';$('connection').className=snapshot.inventoryError?'stale':'';
+    $('helper').textContent=`iphone-use: ${snapshot.helper}`;$('alert').textContent=snapshot.inventoryError?`Inventory: ${snapshot.inventoryError}`:'';
+    $('storage').textContent=`Saved preferences and bindings: ${snapshot.database}`;
+  }catch(error){online=false;$('connection').textContent='Coordinator unreachable';$('connection').className='stale';$('alert').textContent=`Showing the last snapshot. Controls are disabled until reconnection. ${error.message}`;}
+  finally{polling=false;render();}
+}
+$('search').addEventListener('input',render);poll();setInterval(poll,1000);
+</script></body></html>

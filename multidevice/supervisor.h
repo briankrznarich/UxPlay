@@ -16,6 +16,7 @@ struct Event {
     std::string device_id;
     std::string name;
     std::string model;
+    std::string payload; // Optional opaque application message; never media.
 };
 
 struct Options {
@@ -23,6 +24,7 @@ struct Options {
     unsigned int max_devices = 8;
     unsigned int idle_seconds = 30;
     unsigned short port = 0;
+    bool ipv4_only = false;
 };
 
 // Use the default GLib main context on one thread for all methods/callbacks.
@@ -37,6 +39,8 @@ public:
     unsigned short port() const;
     std::vector<Event> sessions() const;
     bool disconnect(const std::string &session_id);
+    // Bounded asynchronous pipe delivery, on the supervisor main context.
+    bool send(const std::string &session_id, const std::string &payload);
     // Stops accepting, terminates workers, and drains asynchronous completions.
     void stop();
 

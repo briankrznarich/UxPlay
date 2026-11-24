@@ -107,6 +107,19 @@ class SupervisorTests(unittest.TestCase):
         self.addCleanup(harness.close)
         return harness
 
+    def test_private_worker_messages(self):
+        h = self.start()
+        a, _, _ = h.connect()
+        session = h.event("client")[2]
+        payload = '{"token":"123456789", "text":"quoted \"value\""}'
+        h.command("SEND " + session + " " + payload)
+        h.event("message")
+        deadline = time.monotonic() + 3
+        while not any(line[0] == "PAYLOAD" for line in h.lines) and time.monotonic() < deadline:
+            time.sleep(.01)
+        self.assertIn(["PAYLOAD"] + payload.split(), h.lines)
+        self.assertEqual(exchange(a, b"still streaming"), b"still streaming")
+
     def test_peer_isolation_reuse_and_binary_duplex(self):
         h = self.start()
         a, pid_a, peer_a = h.connect()

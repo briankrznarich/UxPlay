@@ -1,6 +1,7 @@
 # SPDX-License-Identifier: GPL-3.0-or-later
 """A protocol worker used to test the supervisor without AirPlay hardware."""
 import os
+import ast
 import socketserver
 import struct
 import sys
@@ -12,6 +13,8 @@ def parent_watch():
     for line in sys.stdin:
         if line.strip() == "STOP":
             break
+        payload, = ast.literal_eval(line)
+        print(("message", payload, "", ""), flush=True)
     os._exit(0)
 
 
