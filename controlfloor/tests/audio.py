@@ -53,7 +53,7 @@ async def main(binary):
         processes=[];logs=[]
         async def launch(wave):
             log=open(root/(wave+'.log'),'w+');logs.append(log)
-            p=await asyncio.create_subprocess_exec(binary,'--controlfloor-config',str(config),'--controlfloor-log-dir',str(root/wave),'--controlfloor-test-source',
+            p=await asyncio.create_subprocess_exec(binary,'--audio-delay-ms',os.environ.get('CF_TEST_AUDIO_DELAY_MS','0'),'--controlfloor-config',str(config),'--controlfloor-log-dir',str(root/wave),'--controlfloor-test-source',
                 env=dict(os.environ,CF_TEST_AUDIO=wave),stdout=log,stderr=log)
             processes.append(p);return await asyncio.wait_for(sessions.get(),15)
         try:

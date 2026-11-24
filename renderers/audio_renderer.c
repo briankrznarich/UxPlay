@@ -24,6 +24,7 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include "audio_renderer.h"
+#include "audio_delay.h"
 #ifdef ENABLE_CONTROLFLOOR
 #include "../controlfloor/controlfloor.h"
 #endif
@@ -129,7 +130,7 @@ bool gstreamer_init(){
     return (bool) check_plugins ();
 }
 
-void audio_renderer_init(logger_t *render_logger, const char* audiosink, const bool* audio_sync, const bool* video_sync, const char *artp_pipeline) {
+void audio_renderer_init(logger_t *render_logger, const char* audiosink, const bool* audio_sync, const bool* video_sync, const char *artp_pipeline, unsigned output_delay_ms) {
     GError *error = NULL;
     GstCaps *caps = NULL;
     GstClock *clock = gst_system_clock_obtain();
@@ -163,6 +164,7 @@ void audio_renderer_init(logger_t *render_logger, const char* audiosink, const b
         default:
             break;
         }
+        if (output_delay_ms) g_string_append(launch, AUDIO_DELAY_PIPELINE);
 #ifdef ENABLE_CONTROLFLOOR
         if (cf_enabled()) g_string_append(launch, "tee name=cf_audio_tee ! queue ! ");
 #endif
@@ -214,6 +216,7 @@ void audio_renderer_init(logger_t *render_logger, const char* audiosink, const b
         }
 
         g_assert (renderer_type[i]->pipeline);
+        audio_delay_attach(renderer_type[i]->pipeline, output_delay_ms);
 #ifdef ENABLE_CONTROLFLOOR
         if (cf_enabled()) cf_attach_audio(renderer_type[i]->pipeline);
 #endif
@@ -411,6 +414,7 @@ void audio_renderer_set_volume(double volume) {
 }
 
 void audio_renderer_flush() {
+    if (renderer) audio_delay_reset(renderer->pipeline);
 #ifdef ENABLE_CONTROLFLOOR
     cf_audio_flush();
 #endif

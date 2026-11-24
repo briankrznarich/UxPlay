@@ -318,6 +318,14 @@ muted after a provider disconnect; the server/viewer requests audio again after
 reconnecting. These commands do not pause the phone’s media or change the Mac’s
 local playback. Audio forwarding also works while JPEG forwarding is stopped.
 
+For manual A/V alignment, add `--audio-delay-ms 150` to the UxPlay command.
+This adds 150 ms to both local and remote audio for all workers, including with
+`-vsync no`. Whole milliseconds from 0 to 5000 are accepted; default is 0.
+It operates before the remote capture queue, so the intentional delay does not
+count against that queue's 250 ms stale-packet limit. See
+[manual sync adjustment](../MULTIDEVICE.md#manually-adjusting-audiovideo-sync)
+for sample-delay behavior and scope.
+
 `startAudio` and `setAudioStreamConfiguration` accept:
 
 ```json

@@ -76,6 +76,31 @@ independent of JPEG forwarding and video ACKs. See
 [Audio forwarding](controlfloor/README.md#audio-forwarding) for formats, buffering
 and API details.
 
+### Manually adjusting audio/video sync
+
+Add `--audio-delay-ms 150` to delay audio by 150 milliseconds on every worker.
+The value is a whole number from **0 to 5000**; default `0` preserves the existing
+path. Restart UxPlay with another value to tune it by ear. For remote-only sound,
+the end of your command can be:
+
+```sh
+-vsync no -as fakesink --audio-delay-ms 150
+```
+
+The delay applies to decoded audio before it splits into host playback and
+ControlFloor forwarding, so both receive the same added delay. It also works
+without ControlFloor. It leaves video unchanged and works with `-vsync no`;
+it does not turn timestamp synchronization back on. Existing synchronization or
+viewer buffering can add their own latency on top.
+
+This is a bounded PCM sample delay: initial silence, followed by the sound shifted
+by the requested number of samples at 44.1 kHz (rounded to the nearest sample).
+It follows incoming audio cadence, with no sleeping in receive callbacks and no
+new codec/plugin dependency. It is intended for continuous playback while tuning
+sync. Flush, discontinuity, or a new stream clears the retained samples; trailing
+sound is not drained after the stream ends. HLS/recording paths do not use this
+decoded-audio renderer and are outside the option's scope.
+
 ## Architecture and orchestration boundary
 
 ```text

@@ -157,6 +157,14 @@ are dynamically assigned. See MULTIDEVICE.md.
 .TP
 \fB\-as\fR 0     (or \fB\-a\fR) Turn audio off, streamed video only.
 .TP
+\fB\-\-audio-delay-ms\fR N  Add 0..5000 ms of decoded-audio delay (default 0).
+Applies to local playback and ControlFloor forwarding in every worker, including
+with -vsync no. Video is unchanged. Uses a bounded sample buffer, cleared on
+flush/discontinuity/new stream; trailing audio is discarded when the stream ends.
+HLS and recording paths are excluded. Use -as fakesink for silent local output
+while retaining delayed ControlFloor audio; -a or -as 0 disables both outputs.
+
+.TP
 \fB\-al\fR x     Audio latency in seconds (default 0.25) reported to client.
 .TP
 \fB\-ca\fR       Display cover-art in AirPlay Audio (ALAC) mode.

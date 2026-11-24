@@ -114,6 +114,7 @@ static raop_t *raop = NULL;
 static logger_t *render_logger = NULL;
 static bool audio_sync = false;
 static bool video_sync = true;
+static unsigned audio_output_delay_ms = 0;
 static int64_t audio_delay_alac = 0;
 static int64_t audio_delay_aac = 0;
 static bool relaunch_video = false;
@@ -1141,6 +1142,7 @@ static void print_info (char *name) {
     printf("-pw [pwd] Require use of password to control client access;\n");
     printf("          (with no pwd, pin entry is required at *each* connection.)\n");  
     printf("          (option \"-pw\" after \"-pin\" overrides it, and vice versa)\n");
+    printf("--audio-delay-ms N  Delay local and ControlFloor audio by 0..5000 ms (default 0); works with -vsync no\n");
     printf("-vsync [x]Mirror mode: sync audio to video using timestamps (default)\n");
     printf("          x is optional audio delay: millisecs, decimal, can be neg.\n");
     printf("-vsync no Switch off audio/(server)video timestamp synchronization \n");
@@ -1751,6 +1753,13 @@ static void parse_arguments (int argc, char *argv[]) {
             fprintf(stderr,"invalid: option \"-scrsv\" is currently only implemented for Linux/*BSD systems with D-Bus service\n");
             exit(1);
 #endif
+        } else if (arg == "--audio-delay-ms") {
+            std::string value = i + 1 < argc ? argv[++i] : "";
+            if (value.empty() || value.size() > 4 || value.find_first_not_of("0123456789") != std::string::npos || std::stoul(value) > 5000) {
+                fprintf(stderr, "--audio-delay-ms requires an integer from 0 to 5000 milliseconds\n");
+                exit(1);
+            }
+            audio_output_delay_ms = static_cast<unsigned>(std::stoul(value));
         } else if (arg == "-vsync") {
             video_sync = true;
 	    if (i <  argc - 1) {
@@ -3889,14 +3898,14 @@ int main (int argc, char *argv[]) {
 #ifdef ENABLE_CONTROLFLOOR
     int cf_result = cf_start();
     if (cf_result != 0) exit(cf_result > 0 ? 0 : 1);
-    if (cf_test_source()) exit(cf_run_test_source());
+    if (cf_test_source()) exit(cf_run_test_source(audio_output_delay_ms));
 #endif
     render_logger = logger_init();
     logger_set_callback(render_logger, log_callback, NULL);
     logger_set_level(render_logger, log_level);
 
     if (use_audio) {
-        audio_renderer_init(render_logger, audiosink.c_str(), &audio_sync, &video_sync, audio_rtp_pipeline.c_str());
+        audio_renderer_init(render_logger, audiosink.c_str(), &audio_sync, &video_sync, audio_rtp_pipeline.c_str(), audio_output_delay_ms);
     } else {
         LOGI("audio_disabled");
     }

@@ -12,7 +12,7 @@ int cf_start(void);
 void cf_connection_open(void);
 int cf_enabled(void);
 int cf_test_source(void);
-int cf_run_test_source(void);
+int cf_run_test_source(unsigned audio_delay_ms);
 void cf_stop(void);
 void cf_client(const char *identifier, const char *name, const char *model);
 void cf_disconnected(void);

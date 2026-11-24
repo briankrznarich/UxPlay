@@ -1547,6 +1547,13 @@ playing through the host speakers, use **-as fakesink**: decoding stays enabled
 and only the local output is discarded. See
 [the audio behavior table](MULTIDEVICE.md#audio-output-and-controlfloor-streaming).
 
+**--audio-delay-ms *N*** (this fork) adds 0–5000 milliseconds of decoded-audio
+delay, default 0, to local playback and ControlFloor forwarding for all workers.
+Works with `-vsync no`; video is unchanged. For example,
+`-as fakesink --audio-delay-ms 150` keeps local speakers silent and delays remote
+audio by 150 ms. See [manual sync adjustment](MULTIDEVICE.md#manually-adjusting-audiovideo-sync)
+for scope and reset behavior.
+
 **-al *x*** specifies an audio latency *x* in (decimal) seconds in
 Audio-only (ALAC), that is reported to the client. Values in the range
 \[0.0, 10.0\] seconds are allowed, and will be converted to a whole
