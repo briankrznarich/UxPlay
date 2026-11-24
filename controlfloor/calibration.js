@@ -20,9 +20,18 @@ function movement(p,[x,y]) {
   const lo=Math.floor(r), hi=Math.ceil(r), d=a[lo]+(a[hi]-a[lo])*(r-lo);
   return [x*d/r,y*d/r];
 }
-function equivalent(a,b) {
-  return a.deadZone===b.deadZone && a.axisPoints.length===b.axisPoints.length &&
-    a.axisPoints.every((v,i)=>Math.abs(v-b.axisPoints[i])<=.75);
+function detectionWinner(candidates,used) {
+  // Safari can measure a shorter domain than the native canvas. Do not force a
+  // sweep just because the catalog also contains a longer version of that curve.
+  // Choose the shortest survivor, retaining its exact fingerprint and bounded
+  // domain. Every survivor must agree across that ENTIRE domain, not just at
+  // the few probes. Unmeasured tails of longer candidates are never activated.
+  const selected=candidates.reduce((best,c)=>!best||c.profile.axisPoints.length<best.profile.axisPoints.length?c:best,null);
+  if(!selected || used.filter(n=>selected.profile.axisPoints[n]>.75).length<2)return null;
+  const p=selected.profile;
+  if(!candidates.every(c=>c.profile.deadZone===p.deadZone &&
+    p.axisPoints.every((v,i)=>Math.abs(v-c.profile.axisPoints[i])<=tolerance(Math.min(v,c.profile.axisPoints[i])))))return null;
+  return selected;
 }
 function safeCount(p,limit) {
   let n=p.axisPoints.length-1;
@@ -84,9 +93,9 @@ async function run(io,g,{force=false}={}) {
       const r=await io.trial([[0,n]],{label:'Detecting existing profile'});used.push(n);
       candidates=r.clipped?[]:candidates.filter(c=>Math.hypot(r.dx,r.dy-c.profile.axisPoints[n])<=tolerance(c.profile.axisPoints[n]));
     }
-    const first=candidates[0];
-    if(first && used.filter(n=>first.profile.axisPoints[n]>.75).length>=2 && candidates.every(c=>equivalent(first.profile,c.profile))) {
-      saved=await io.call('select',{fingerprint:first.fingerprint});matched=true;
+    const winner=detectionWinner(candidates,used);
+    if(winner) {
+      saved=await io.call('select',{fingerprint:winner.fingerprint});matched=true;
     }
   }
   if(!saved) {
@@ -112,7 +121,7 @@ async function run(io,g,{force=false}={}) {
   const result=await io.call('commit',{fingerprint:saved.fingerprint});
   return {...result,matched,validation,profile:saved.profile};
 }
-const api={run,validate,valid,movement,nextCount};
+const api={run,validate,valid,movement,nextCount,detectionWinner};
 if(typeof module!=='undefined'&&module.exports)module.exports=api;
 else root.MouseCalibration=api;
 })(globalThis);

@@ -164,7 +164,7 @@ struct PairingCoordinator::Impl {
         double calibrationContact = 0;
         int64_t lastSeen = 0;
         double savedAt = 0;
-        bool replayRequested = false;
+        bool replayRequested = false, calibrationForAdmission = false;
         bool present = false, initialReport = false, fetched = false, reported = false, replayDone = false;
         double due = 0, deadline = 0, started = 0;
         unsigned long replayProbe = 0;
@@ -253,7 +253,7 @@ struct PairingCoordinator::Impl {
     void state(Keyboard &k) {
         if (k.worker.empty()) return;
         output(k.worker, {{"type","binding"}, {"connection",k.connection}, {"token",k.token},
-            {"keyboard",k.host}, {"about",k.phase=="reading-about" || k.phase=="going-home" || k.phase=="live" || k.phase=="shortcut" || (k.phase=="calibration" && k.calibrationReturnPhase=="live")}, {"admit",k.phase == "live" || k.phase == "shortcut" || (k.phase=="calibration" && k.calibrationReturnPhase=="live")},
+            {"keyboard",k.host}, {"about",k.phase=="reading-about" || k.phase=="going-home" || k.phase=="live" || k.phase=="shortcut" || k.phase=="calibration-complete" || (k.phase=="calibration" && k.calibrationForAdmission)}, {"admit",k.phase == "live" || k.phase == "shortcut"},
             {"input",k.input.state()}});
     }
     Keyboard *byIP(const std::string &ip) {
@@ -317,7 +317,7 @@ struct PairingCoordinator::Impl {
     }
     void begin(Keyboard &k) {
         if (!acquire(k)) return;
-        k.token = freshToken(); k.started = now(); k.expectedSerial.clear();
+        k.token = freshToken(); k.started = now(); k.expectedSerial.clear(); k.calibrationForAdmission=false;
         k.operation = "Pairing keyboard";
         if (!k.lastIP.empty()) {
             Bootstrap request; request.requestId=uuid(); request.at=k.started; request.fetched=false;
@@ -339,13 +339,18 @@ struct PairingCoordinator::Impl {
             k.calibration["error"]=r.error;
             const std::string operation=work.request.at("operation");
             log(k,"mouse-calibration-result",{{"operation",operation},{"result",r.value},{"error",r.error}});
-            if (operation=="commit" || operation=="cancel" || !r.error.empty()) {
-                k.calibration["active"]=false;
-                k.phase=k.calibrationReturnPhase;
-                k.requestId.clear();
-                k.operation=operation=="commit" && r.error.empty() ? "Mouse calibrated: "+r.value.value("name","") : "Mouse calibration stopped";
-                k.error=r.error;
-                if (!r.error.empty()) k.input.reset();
+            if (!r.error.empty() || operation=="cancel") {
+                stopCalibration(k,r.error);
+            } else if (operation=="commit") {
+                k.calibration["active"]=false; k.requestId.clear();
+                k.error.clear(); k.operation="Mouse calibrated: "+r.value.value("name","");
+                if (k.calibrationForAdmission) {
+                    // Give the page time to receive its committed result before
+                    // Home backgrounds Safari. Admission stays closed until Home completes.
+                    k.phase="calibration-complete"; k.due=now()+1;
+                    k.deadline=now()+opt.timeout;
+                    log(k,"mouse-calibration-admission-ready");
+                } else k.phase=k.calibrationReturnPhase;
                 state(k);
             }
             return;
@@ -383,13 +388,22 @@ struct PairingCoordinator::Impl {
             k.replayProbe = k.input.state().value("probeSequence",0UL);
             log(k,"replay-started",r.value);
         } else if (work.operation == "home") {
+            // Calibration can take long enough for another keyboard to finish
+            // identifying the same serial. Recheck at the admission boundary.
+            for (const auto &entry : keyboards) {
+                const auto &other=*entry.second;
+                if (&other!=&k && controlfloorActive(other) &&
+                    other.identity.value("serialNumber","")==k.identity.value("serialNumber","")) {
+                    fail(k,"Serial number already belongs to another live keyboard"); return;
+                }
+            }
             k.phase = "live"; k.operation="Waiting for ControlFloor";
             k.lastIdentity=k.identity; save(k); log(k,"live",k.identity); state(k);
         } else if (work.operation == "shortcut-click") log(k,"shortcut-triggered");
         else if (work.operation == "about-click") log(k,"about-shortcut-triggered");
     }
     bool quiescent(const Keyboard &k) const {
-        return k.phase=="idle" || k.phase=="failed" || k.phase=="remembered" || k.phase=="paired";
+        return k.phase=="idle" || k.phase=="failed" || k.phase=="remembered" || k.phase=="paired" || k.phase=="calibration-required";
     }
     bool bindExisting(Keyboard &k) {
         if (k.ip.empty() || !k.initialReport) return false;
@@ -442,10 +456,20 @@ struct PairingCoordinator::Impl {
         k.error=error; k.operation=error.empty() ? "Mouse calibration cancelled" : "Mouse calibration failed";
         log(k,"mouse-calibration-stopped",error); state(k);
     }
-    void startCalibration(Keyboard &k, bool force) {
-        k.calibrationReturnPhase=k.phase;
+    bool controlfloorActive(const Keyboard &k) const {
+        // Include admission/reconnect and in-flight shortcuts, not just the last
+        // asynchronous connected flag, so a socket cannot open mid-calibration.
+        if (k.phase=="live" || k.phase=="shortcut") return true;
+        auto worker=workers.find(k.worker);
+        return worker!=workers.end() && worker->second.progress.value("token","")==k.token &&
+            (worker->second.progress.value("providerConnected",false) || worker->second.progress.value("providerTransportOpen",false));
+    }
+    void startCalibration(Keyboard &k, bool force, bool admitAfter = false) {
+        if (controlfloorActive(k)) throw std::runtime_error("Disconnect ControlFloor before calibrating the mouse");
+        k.calibrationForAdmission=admitAfter || k.phase=="calibration-required";
+        k.calibrationReturnPhase=k.calibrationForAdmission ? "calibration-required" : k.phase;
         k.calibration={{"session",uuid()},{"active",true},{"busy",false},{"job",0},
-            {"force",force},{"result",nullptr},{"error",""},{"status","Opening Safari"}};
+            {"force",force},{"requiredForAdmission",k.calibrationForAdmission},{"result",nullptr},{"error",""},{"status","Opening Safari"}};
         k.calibrationContact=now();
         k.calibration["url"]=calibrationURL(k);
         command(k,{{"command","open-url"},{"url",k.calibration["url"]}});
@@ -479,6 +503,10 @@ struct PairingCoordinator::Impl {
             else if (action=="mouse8") task(k,"manual-click","clickMouseButton",{{"button",8}});
             return;
         }
+        if (k.phase=="calibration-complete" && now()>=k.due) {
+            k.phase="going-home"; k.operation="Finishing setup after mouse calibration";
+            task(k,"home","simulateHomeButton");
+        }
         if (k.phase=="calibration") {
             if (!k.present) stopCalibration(k,"Keyboard disappeared during calibration");
             else if (now()-k.calibrationContact>60) stopCalibration(k,"Calibration page timed out");
@@ -488,7 +516,7 @@ struct PairingCoordinator::Impl {
             k.autoConnect && !k.manualHold && free && now() >= k.due) {
             k.continueAfterPair=true; begin(k); return;
         }
-        if (k.phase=="paired" && !ready) { fail(k,"Paired keyboard disappeared; rediscovery required"); return; }
+        if ((k.phase=="paired" || k.phase=="calibration-required") && !ready) { fail(k,"Paired keyboard disappeared; rediscovery required"); return; }
         if (quiescent(k)) return;
         if (!ready) { fail(k,"Keyboard/mouse disappeared or HID reports are unavailable"); return; }
         if (k.phase != "live" && now() > k.deadline) { fail(k,"Timed out waiting in "+k.phase); return; }
@@ -551,8 +579,9 @@ struct PairingCoordinator::Impl {
                         fail(k,"Serial number already belongs to another live keyboard"); return;
                     }
                 k.expectedSerial.clear();
-                log(k,"device-identified",k.identity); k.phase = "going-home";
-                task(k,"home","simulateHomeButton");
+                k.lastIdentity=k.identity; save(k);
+                log(k,"device-identified",k.identity);
+                startCalibration(k,false,true); state(k);
             }
         }
     }
@@ -716,8 +745,8 @@ struct PairingCoordinator::Impl {
                 {"airplayConnected",!k.worker.empty()},{"providerConnected",cf},{"providerTransportOpen",transport},
                 {"retryIn",k.autoConnect && !k.manualHold && k.phase=="failed" ? std::max(0.0,k.due-now()) : 0},
                 {"actions",{{"mouse8",controllable},{"pair",controllable},
-                    {"calibrate",controllable && !k.ip.empty() && k.initialReport},
-                    {"calibrate-new",controllable && !k.ip.empty() && k.initialReport},
+                    {"calibrate",controllable && !controlfloorActive(k) && !k.ip.empty() && k.initialReport},
+                    {"calibrate-new",controllable && !controlfloorActive(k) && !k.ip.empty() && k.initialReport},
                     {"cancel-calibration",k.phase=="calibration"},
                     {"mirror",controllable && quiescent(k) && (!k.ip.empty() || !k.lastIP.empty())},{"reset",true},{"resume",true}}},
                 {"history",k.history}});
@@ -749,6 +778,7 @@ struct PairingCoordinator::Impl {
                 if (!body["autoConnect"].get<bool>()) reset(k,false);
                 else { k.autoConnect=true; k.manualHold=false; k.due=0;
                     if (k.phase=="paired") k.pendingManual="mirror";
+                    else if (k.phase=="calibration-required") k.pendingManual="calibrate";
                     log(k,"auto-connect-enabled"); }
             }
             if (body.contains("label")) k.label=body["label"].get<std::string>();
@@ -760,6 +790,7 @@ struct PairingCoordinator::Impl {
         else if (action=="resume") {
             k.autoConnect=true; k.manualHold=false; k.due=0;
             if (k.phase=="paired") k.pendingManual="mirror";
+            else if (k.phase=="calibration-required") k.pendingManual="calibrate";
             save(k); log(k,"auto-connect-enabled");
         } else {
             if (action!="mouse8" && action!="pair" && action!="mirror" && action!="calibrate" && action!="calibrate-new") return response({{"error","Unknown keyboard action"}},400);
@@ -769,6 +800,8 @@ struct PairingCoordinator::Impl {
                 return response({{"error","Keyboard/mouse is not ready"}},409);
             if (!k.work.empty() || !k.input.idle() || !k.pendingManual.empty() || capture=="recording" || capture=="replaying" ||
                 (!quiescent(k) && k.phase!="live")) return response({{"error","Keyboard is busy; turn auto-connect off to stop it first"}},409);
+            if ((action=="calibrate" || action=="calibrate-new") && controlfloorActive(k))
+                return response({{"error","Disconnect ControlFloor before calibrating the mouse"}},409);
             if ((action=="calibrate" || action=="calibrate-new") && (k.ip.empty() || !k.initialReport))
                 return response({{"error","Pair Keyboard first to learn the phone IP"}},409);
             if (action=="mirror" && (k.phase=="live" || (k.ip.empty() && k.lastIP.empty())))
@@ -791,6 +824,7 @@ struct PairingCoordinator::Impl {
         std::string operation=body.value("operation","");
         k->calibrationContact=now();
         if (operation=="status") { J value=k->calibration; value["inputIdle"]=k->work.empty() && k->input.idle(); return response(value); }
+        if (controlfloorActive(*k)) return response({{"error","Mouse calibration is unavailable while ControlFloor is connected or connecting"}},409);
         if (!k->calibration.value("active",false)) return response({{"error","Calibration has ended"}},409);
         if (operation=="abort") {
             stopCalibration(*k,body.value("error","Calibration page cancelled")); return response(k->calibration);

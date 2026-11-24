@@ -5,6 +5,7 @@ No real helper, AirPlay, network configuration, credentials or phone input used.
 """
 import asyncio, json, pathlib, sys, tempfile, time, socket, re
 from aiohttp import web, ClientSession
+from calibration_client import complete_calibration
 
 async def main(binary):
     calls=[]; host='keyboard-A'; phone_ip='127.0.0.1'; inventory=[host,'keyboard-B']
@@ -50,6 +51,12 @@ async def main(binary):
             assert body['button']==8 and 'x' not in body and 'y' not in body
             if action=='mouseUp':
                 if pairing_request is None:tasks.append(asyncio.create_task(initial_fetch()))
+                elif ready and not admitted:
+                    async def calibration():
+                        req=await fetch();assert req['command']=='open-url',req
+                        assert (await report(req))[0]==200
+                        await complete_calibration(http,base,req['url'])
+                    tasks.append(asyncio.create_task(calibration()))
                 elif admitted:
                     async def remote_shortcut():
                         req=await fetch(); record['remote']=req

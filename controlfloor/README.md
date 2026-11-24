@@ -401,6 +401,8 @@ keyboard/About identification, distinct server devices, orientation changes,
 viewer video control, and disconnect/reconnect. Mock tests do not validate
 AirPlay encryption, phone UI behavior or real-time playback performance.
 
-LAN keyboards also have manual [web mouse calibration](MOUSE_CALIBRATION.md):
-open a Safari canvas through the LAN shortcut, detect an existing profile or run a
-full measured sweep, validate, and activate it through the hardware-server API.
+LAN keyboards run [web mouse calibration](MOUSE_CALIBRATION.md):
+after hardware identification and before ControlFloor registration. The LAN shortcut
+opens a Safari canvas, detects an existing profile or runs a full measured sweep,
+then validates and activates it through the hardware-server API. Manual actions
+remain available before admission; calibration is blocked while ControlFloor is active.

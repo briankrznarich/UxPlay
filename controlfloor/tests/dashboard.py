@@ -13,12 +13,14 @@ import sys
 import tempfile
 import time
 from aiohttp import ClientSession, web
+from calibration_client import complete_calibration
 
 async def main(binary, demo=False):
     host='keyboard-A'; inventory=[host]; calls=[]; timed_calls=[]; tasks=[]; outputs=[]
     request=None; code=''; process=None; reader=None; base=''; token=''
     capture='idle'; connected=False; cf=False; ready=False; worker='receiver-1'
     status_task=None; mirror_count=0; serial='TEST23456789'; mode='manual'
+    calibration_release=asyncio.Event();calibration_release.set();calibration_urls=[]
     hold_about=False; about_fetched=False; about_release=asyncio.Event()
     async def until(predicate, seconds=10):
         deadline=time.monotonic()+seconds
@@ -48,7 +50,7 @@ async def main(binary, demo=False):
     async def status():
         if connected:
             await event('message',dict(type='status',connection=1,connected=True,ready=ready,
-                providerConnected=cf,providerTransportOpen=ready,
+                providerConnected=cf,providerTransportOpen=ready and any(v['message'].get('admit') and v['message'].get('token')==code for v in outputs),
                 identity=dict(keyboardId=code,name='Fixture phone',modelName='iPhone SE',serialNumber=serial)))
     async def statuses():
         while True:
@@ -60,9 +62,12 @@ async def main(binary, demo=False):
         nonlocal request,code,capture,mirror_count,ready,about_fetched
         body=await r.json(); action=r.match_info['action'];calls.append((action,body));timed_calls.append((time.monotonic(),action,body))
         if body['device']!=host:return web.json_response({'submitted':True,'mouse':{'down':action=='mouseDown'}})
-        if action=='mouseUp' and mode in ('pair','reuse'):
+        if action=='mouseUp' and (mode in ('pair','reuse') or ready):
             fetched=await fetch()
             if fetched['command']=='initiate-pairing':request=fetched
+            elif fetched['command']=='open-url':
+                calibration_urls.append(fetched['url']);assert (await report(fetched))[0]==200
+                tasks.append(asyncio.create_task(complete_calibration(http,base,fetched['url'],calibration_release)))
             else:
                 assert fetched['command']=='prefs-general-about',fetched
                 assert (await report(fetched))[0]==200
@@ -218,12 +223,33 @@ async def main(binary, demo=False):
                 assert startup[4][2]['text']==code
                 print('PASS real startup timings: Home, 1s, Home, 1s, Mouse 8, 2s, pairing code, Enter')
                 assert not bound['autoConnect']
-                mode='manual';await control('mirror')
+                mode='manual';calibration_release.clear();await control('mirror')
+                blocked=await until(lambda:matches(phase='calibration'))
+                assert blocked['identity']['serialNumber']==serial
+                assert blocked['calibration']['requiredForAdmission']
+                assert not any(v['message'].get('admit') for v in outputs)
+                await until(lambda:calibration_urls)
+                old_calibration=calibration_urls[-1].split('#')[1]
+                await control('cancel-calibration')
+                await until(lambda:matches(phase='calibration-required'))
+                assert not any(v['message'].get('admit') for v in outputs)
+                calibration_release.set()
+                async def calibration_available():return (await row())['actions']['calibrate']
+                await until(calibration_available);await control('calibrate')
                 await until(lambda:matches(phase='live'))
+                assert len(calibration_urls)==2
+                for action in ('calibrate','calibrate-new'):
+                    assert not (await row())['actions'][action]
+                    await control(action,expected=409)
+                print('PASS OCR launches calibration; cancellation blocks admission; retry commits before Home/admission; connection-in-progress rejects calibration')
                 assert await unpaired()==[], 'Bound streams must not appear as unpaired'
                 assert (await row())['displayPhase']=='connecting-to-controlfloor'
                 cf=True
                 await until(lambda:matches(displayPhase='connected-to-controlfloor'))
+                await control('calibrate',expected=409)
+                for sid in (old_calibration,calibration_urls[-1].split('#')[1]):
+                    async with http.post(base+'/api/calibration',json={'session':sid,'operation':'begin'}) as r:assert r.status==409
+                print('PASS connected ControlFloor rejects dashboard calibration and old page mutations')
                 print('PASS manual pairing stops at IP callback; mirroring reaches OCR/admission and waits for server confirmation')
                 await disconnect_client(worker,1,409) # Pairing raced the UI: don't kick a bound client.
                 await control('settings',autoConnect=False)

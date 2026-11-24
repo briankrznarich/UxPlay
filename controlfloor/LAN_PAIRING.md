@@ -67,7 +67,8 @@ The parent process owns one IPv4 HTTP listener, the keyboard registry and the
 pairing coordinator. It polls iphone-use's inventory approximately once a second.
 Each keyboard has its own serialized input worker; one slow keyboard does not
 hold up another keyboard or video decoding. The helper's currently selected
-mouse profile is used without calibration.
+mouse profile is used for startup navigation; after hardware OCR the web calibration
+step verifies/selects a profile or generates one before ControlFloor admission.
 
 1. **Discover and trigger.** Every available, unpaired keyboard with auto-connect
    enabled gets a fresh pairing token such as `01-17-45-07` (four zero-padded
@@ -115,7 +116,12 @@ mouse profile is used without calibration.
    the second token-display/OCR step: the typed callback proves keyboard → IP,
    and the IPv4 connection proves IP → video. The original token-OCR gate remains
    unchanged for manual mode.
-8. **Go live.** The parent sends Home through the matched keyboard. Once that HID
+8. **Calibrate, then go live.** After hardware identification the parent sends
+   Mouse 8 with a queued `open-url` for the hosted calibration page. Detection
+   validates an existing profile or generates and validates a full curve. A
+   successful profile commit is required; cancellation/failure leaves the keyboard
+   at `calibration-required` with its binding retained and admission closed.
+   After success the parent waits one second, then sends Home through the matched keyboard. Once that HID
    submission succeeds it authorizes the worker to register `airplay-<serial>`
    with ControlFloor. Home's resulting screen is not visually verified. Duplicate
    serial numbers are rejected. The reported `keyboardId` is now the actual
@@ -288,7 +294,7 @@ and server restarts. Every event includes its pairing code for correlation.
 | Auto-connect OFF | Stop the attempt/provider binding, cancel replay best-effort, preserve the AirPlay transport and remembered IP/identity, and allow manual actions. |
 | Mouse 8 | Send one atomic button-only click to this keyboard. Do not type a token or start the rest of pairing. |
 | Pair Keyboard | Pause background startup, send Home twice (one-second intervals), click Mouse 8, wait two seconds, then type a fresh token and Enter. **Stop after the callback binds the phone IP.** |
-| Start Screen Mirroring | Reuse a connected same-IP AirPlay stream with Mouse 8 → About, or run replay if none exists; read fresh identity, send Home and admit to ControlFloor. |
+| Start Screen Mirroring | Reuse a connected same-IP AirPlay stream with Mouse 8 → About, or run replay if none exists; read fresh identity, calibrate the mouse, send Home and admit to ControlFloor. |
 | Resume auto-connect | Enable automatic startup again; if already at the manual paired stage, continue into mirroring. |
 | Reset & pause | Stop the attempt/provider binding, forget the saved IP and identity, clear the token, and turn auto-connect OFF. AirPlay remains in the unpaired list. |
 | Disconnect client (unpaired AirPlay table) | Stop the selected AirPlay worker without changing any keyboard preferences. |
@@ -364,11 +370,12 @@ ControlFloor server. Neither sends input to live phones. Real shortcut permissio
 replay navigation, LAN reachability and successful Home navigation still require
 hardware verification.
 
-### Manual web mouse calibration
+### Web mouse calibration before admission
 
 After the keyboard has an active IP binding, its action menu offers **Detect /
 calibrate mouse**, **Calibrate mouse — new profile**, and **Cancel mouse
 calibration**. The LAN shortcut opens a hosted Safari canvas via `open-url`; the
 page measures/validates raw HID movement and the helper commits the resulting
-profile. This does not run automatically. See [MOUSE_CALIBRATION.md](MOUSE_CALIBRATION.md)
+profile. This runs automatically after About identification and before ControlFloor
+registration; manual actions are unavailable while ControlFloor is active. See [MOUSE_CALIBRATION.md](MOUSE_CALIBRATION.md)
 for the flow, coordinate model, reusable assets, and independent hardware-server API.

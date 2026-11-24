@@ -1,23 +1,37 @@
 # LAN web mouse calibration
 
-This is a **manual** keyboard dashboard action. It is not part of automatic
-pairing, hardware identification, or ControlFloor admission yet. No inspector
-app, developer mode, USB connection, OCR, or AirPlay video measurement is used.
+LAN startup automatically runs mouse detection/calibration **after About OCR has
+identified the hardware and before ControlFloor admission**. Mouse 8 invokes the
+LAN shortcut's `open-url` command to launch the page. The calibration itself uses
+no inspector app, developer mode, USB connection, OCR, or AirPlay video measurement.
 The phone needs portrait Safari, AssistiveTouch mouse input, and the installed
 ControlFloorLAN shortcut bound to Mouse 8. Leave the phone untouched during a run.
 
 ## Running it
 
 1. Build/restart UxPlay with the usual `--controlfloor-lan` arguments.
-2. Pair the keyboard so its current phone IP is known. AirPlay/ControlFloor may
-   already be active, but are not required for calibration.
-3. In that keyboard's **Action…** menu choose **Detect / calibrate mouse**, or
+2. Normal startup proceeds from hardware identification into calibration automatically.
+   An existing profile is detected/validated when possible; otherwise a full curve
+   is generated. Only a successful commit can allow ControlFloor admission.
+3. To test manually, pair the keyboard so its current phone IP is known, then in
+   that keyboard's **Action…** menu choose **Detect / calibrate mouse**, or
    **Calibrate mouse — new profile** to skip matching and measure a fresh curve.
 4. UxPlay queues `open-url` with a session-specific HTTP URL, then clicks Mouse 8.
    The shortcut opens Safari. The page waits for a stable viewport and completion
    of Mouse 8, then starts automatically.
-5. Watch the page and the keyboard row's status. The page remains open at the end;
-   use Home when done. **Cancel mouse calibration** stops it from the dashboard.
+5. Watch the page and keyboard status. During startup, successful calibration is
+   followed by a one-second result-display grace period, Home, and ControlFloor
+   registration. A standalone manual run before hardware identification stays on
+   its result page. **Cancel mouse calibration** stops it from the dashboard.
+
+Cancellation, failure, or timeout during startup leaves **Mouse calibration
+required**, retaining the IP/hardware binding but keeping ControlFloor admission
+closed. Retry with **Detect / calibrate mouse**, **Calibrate mouse — new profile**,
+or **Resume auto-connect**. It does not automatically spin on a failed calibration.
+The dropdown and server both reject calibration once ControlFloor is admitted,
+connecting, connected, or reconnecting. Reset/pause that connection before manual
+recalibration. Previously opened calibration pages cannot issue further mutations
+after completion or while ControlFloor is active.
 
 “New profile” uses the driver's force policy: in current iphone-use it may replace
 an existing generated profile file with the same canonical name, **only after
@@ -56,8 +70,12 @@ measure endpoint displacement; their timestamps are not HID transport timestamps
 Do not rotate, change zoom, resize browser chrome, or background Safari mid-run.
 
 Normal detection uses up to four adaptive vertical probes against dense known
-profiles. Distinct surviving curves are ambiguous and trigger generation.
-Equivalent survivors may use catalog priority. A selected existing profile also
+profiles. Survivors with the same dead zone that agree within detection tolerance at every
+count across the shortest survivor's full domain may reuse that shortest profile.
+This handles Safari-generated curves alongside longer native-canvas versions,
+without activating unverified longer tails. Catalog order breaks equal-domain
+ties. Divergence within the chosen domain remains ambiguous and triggers generation.
+A selected existing profile also
 passes the validation suite before activation.
 
 Full generation measures every integer HID magnitude from 1 through 127 **within
@@ -96,14 +114,14 @@ finished. Browser fetch/JS timers never schedule individual HID packets.
 
 There is no human-interference lock. Ordinary coordinator commands defer while
 its own calibration is running, and its inventory/recovery polling does not
-release a button in the middle of its own trial. Video and existing CF registration
-continue. Closing/resetting the session, disconnecting, a driver error, or 60
+release a button in the middle of its own trial. Local AirPlay video continues;
+ControlFloor registration waits for calibration and the final Home command. Closing/resetting the session, disconnecting, a driver error, or 60
 seconds without page contact cancels the raw session. The driver must also expire
 abandoned sessions independently. Existing profile remains active on failure.
 
 Results and errors appear in the keyboard's recent events and append-only log;
-all page requests also use the existing HTTP request log. No automatic Home is
-sent at completion so the result remains visible for development.
+all page requests also use the existing HTTP request log. Startup sends Home after successful calibration; standalone manual runs leave the
+result visible for development.
 
 ## Keyboard/mouse server contract
 

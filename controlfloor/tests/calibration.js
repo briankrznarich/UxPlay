@@ -39,6 +39,25 @@ function fixture({catalog=[],alter=null,prepare=null}={}) {
   io=fixture({catalog:[saved]});result=await engine.run(io,geometry);
   assert(result.matched);assert(!io.calls.some(c=>c.op==='prepare'));assert(io.trials.filter(t=>t.options.label==='Detecting existing profile').length<=4);
   console.log('PASS adaptive existing-profile match with independent validation');
+  const shorter={name:'web-shorter',fingerprint:'c'.repeat(64),profile:{...profile,axisPoints:curve.slice(0,90)}};
+  // Native/full-screen measurements differ slightly from Safari's mapping and
+  // can cover more counts; either catalog order must reuse the bounded curve.
+  const longer={...saved,profile:{...profile,axisPoints:curve.map(v=>v*1.0045)}};
+  for(const catalog of [[longer,shorter],[shorter,longer]]) {
+    io=fixture({catalog});result=await engine.run(io,geometry);
+    assert(result.matched);assert.equal(result.fingerprint,shorter.fingerprint);
+    assert(!io.calls.some(c=>c.op==='prepare'));
+    assert(result.validation.checks>20);
+  }
+  // Agreement only at sampled counts is insufficient. Reject different gates,
+  // divergence inside the chosen domain, and cases with only dead-zone probes.
+  const diverging={...longer,profile:{...longer.profile,axisPoints:longer.profile.axisPoints.map((v,i)=>i===50?v+1.5:v)}};
+  assert.equal(engine.detectionWinner([shorter,diverging],[4,25,60,80]),null);
+  const otherGate={...longer,profile:{...longer.profile,deadZone:3}};
+  assert.equal(engine.detectionWinner([shorter,otherGate],[4,25,60,80]),null);
+  assert.equal(engine.detectionWinner([shorter],[1,2,3]),null);
+  console.log('PASS shorter/longer noisy duplicates reuse shortest fingerprint; divergent curves remain ambiguous');
+
   io=fixture({catalog:[{...saved,profile:{...profile,axisPoints:curve.map(n=>n*1.5)}}]});result=await engine.run(io,geometry);
   assert(!result.matched);assert(io.calls.some(c=>c.op==='prepare'));
   console.log('PASS unmatched catalog continues into complete generation');
