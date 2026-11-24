@@ -11,7 +11,10 @@ int main(int argc, char **argv) {
     ix::initNetSystem();
     controlfloor::PairingOptions options;
     options.helper=argv[1]; options.directory=argv[2]; options.port=static_cast<unsigned short>(std::stoi(argv[3]));
-    options.promptDelay=.1; options.retryDelay=8; options.timeout=12;
+    if (argc < 5 || std::string(argv[4])!="--startup-timing") {
+        options.homeDelay=.05; options.promptDelay=.1;
+    }
+    options.retryDelay=8; options.timeout=12;
     controlfloor::PairingCoordinator coordinator(options);
     coordinator.start();
     std::cout << J{{"port",coordinator.port()}}.dump() << std::endl;

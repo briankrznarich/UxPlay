@@ -15,10 +15,11 @@ import time
 from aiohttp import ClientSession, web
 
 async def main(binary, demo=False):
-    host='keyboard-A'; inventory=[host]; calls=[]; tasks=[]; outputs=[]
+    host='keyboard-A'; inventory=[host]; calls=[]; timed_calls=[]; tasks=[]; outputs=[]
     request=None; code=''; process=None; reader=None; base=''; token=''
     capture='idle'; connected=False; cf=False; ready=False; worker='receiver-1'
     status_task=None; mirror_count=0; serial='TEST23456789'; mode='manual'
+    hold_about=False; about_fetched=False; about_release=asyncio.Event()
     async def until(predicate, seconds=10):
         deadline=time.monotonic()+seconds
         while True:
@@ -34,6 +35,7 @@ async def main(binary, demo=False):
         async with http.post(base+'/shortcuts/report',json=dict(protocolVersion=2,shortcutVersion='0.4.19',status='ok',**req,**extra)) as r:
             return r.status, await r.json()
     async def event(kind, message=None, id=None, peer='127.0.0.1'):
+        if message is not None:message.setdefault('token',code)
         process.stdin.write((json.dumps(dict(type=kind,worker=id or worker,peer=peer,message=message or {}))+'\n').encode())
         await process.stdin.drain()
     async def replay():
@@ -55,10 +57,17 @@ async def main(binary, demo=False):
         return web.json_response({'bluetoothHosts':[dict(bluetoothHost=h,keyboard=True,consumerControls=True,liveMouse=True,
             mouse=dict(logicalWidth=375,logicalHeight=667,down=False,capture=dict(state=capture,error=None))) for h in inventory]})
     async def post(r):
-        nonlocal request,code,capture,mirror_count
-        body=await r.json(); action=r.match_info['action'];calls.append((action,body))
+        nonlocal request,code,capture,mirror_count,ready,about_fetched
+        body=await r.json(); action=r.match_info['action'];calls.append((action,body));timed_calls.append((time.monotonic(),action,body))
         if body['device']!=host:return web.json_response({'submitted':True,'mouse':{'down':action=='mouseDown'}})
-        if action=='mouseUp' and mode=='pair':request=await fetch()
+        if action=='mouseUp' and mode in ('pair','reuse'):
+            fetched=await fetch()
+            if fetched['command']=='initiate-pairing':request=fetched
+            else:
+                assert fetched['command']=='prefs-general-about',fetched
+                assert (await report(fetched))[0]==200
+                ready=True;about_fetched=True
+                if hold_about:await about_release.wait()
         if action=='type':code=body['text']
         if action=='typeSpecialKey':
             key=body['key']
@@ -82,17 +91,22 @@ async def main(binary, demo=False):
     async def control(action, expected=202, **extra):
         async with http.post(base+'/api/keyboards/control',json=dict(id=host,action=action,**extra),headers={'X-UxPlay-Token':token}) as r:
             data=await r.json();assert r.status==expected,(r.status,data);return data
+    async def disconnect_client(id, revision, expected):
+        async with http.post(base+'/api/airplay/disconnect',json={'worker':id,'connection':revision},headers={'X-UxPlay-Token':token}) as r:
+            value=await r.json();assert r.status==expected,(r.status,value)
     async def launch(directory, log):
         nonlocal process,base,reader,status_task
         with socket.socket() as listener:
             listener.bind(('127.0.0.1',0));port=listener.getsockname()[1]
-        process=await asyncio.create_subprocess_exec(binary,helper,directory,str(port),stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=log)
+        process=await asyncio.create_subprocess_exec(binary,helper,directory,str(port),"--startup-timing",stdin=asyncio.subprocess.PIPE,stdout=asyncio.subprocess.PIPE,stderr=log)
         first=json.loads(await asyncio.wait_for(process.stdout.readline(),10));base=f'http://127.0.0.1:{first["port"]}'
         async def read():
-            nonlocal code
+            nonlocal code,ready,cf
             while line:=await process.stdout.readline():
                 item=json.loads(line);outputs.append(item)
                 if item['message'].get('type')=='binding':code=item['message']['token']
+                elif item['message'].get('type')=='revoke' and item['message'].get('token')==code:
+                    ready=False;cf=False
         reader=asyncio.create_task(read());status_task=asyncio.create_task(statuses())
         await until(lambda:matches(inputReady=True))
     async def stop():
@@ -145,7 +159,13 @@ async def main(binary, demo=False):
                 await event('message',dict(status_value,connection=2),id='loose-worker',peer='127.0.0.2')
                 reconnected=(await until(unpaired))[0]
                 assert reconnected['connection']==2 and reconnected['connectedAt']>loose['connectedAt']
-                await event('stopped',id='loose-worker',peer='127.0.0.2');await until(no_unpaired)
+                await disconnect_client('loose-worker',1,409)
+                assert len(await unpaired())==1
+                await disconnect_client('loose-worker',2,202)
+                await until(no_unpaired)
+                await until(lambda:any(v['worker']=='loose-worker' and v['disconnect'] for v in outputs))
+                await disconnect_client('loose-worker',2,409)
+                await event('stopped',id='loose-worker',peer='127.0.0.2')
                 print('PASS unpaired AirPlay inventory includes client metadata, stable connection time, reconnect and disconnect lifecycle')
                 async with http.get(base+'/') as r:
                     html=await r.text();assert r.status==200 and 'text/html' in r.headers['Content-Type'] and '<title>Keyboards' in html
@@ -184,10 +204,19 @@ async def main(binary, demo=False):
                 assert [a for a,_ in calls]==['mouseDown','mouseUp'],calls
                 assert not (await row())['autoConnect']
                 print('PASS dashboard HTML, health, mutation protection, settings validation and one-shot Mouse 8')
+                pairing_call_start=len(timed_calls)
                 mode='pair';await control('pair')
                 bound=await until(lambda:matches(phase='paired'))
                 assert bound['ip']=='127.0.0.1' and bound['bindingVerified'] and bound['pairingCode']==code
                 assert mirror_count==0,'Manual Pair Keyboard must stop at callback, before replay'
+                startup=timed_calls[pairing_call_start:]
+                assert [a for _,a,_ in startup]==['typeSpecialKey','typeSpecialKey','mouseDown','mouseUp','type','typeSpecialKey'],startup
+                assert [b['key'] for _,a,b in startup if a=='typeSpecialKey']==['GoHome','GoHome','Enter']
+                assert startup[1][0]-startup[0][0]>=1, startup
+                assert startup[2][0]-startup[1][0]>=1, startup
+                assert startup[4][0]-startup[3][0]>=2, startup
+                assert startup[4][2]['text']==code
+                print('PASS real startup timings: Home, 1s, Home, 1s, Mouse 8, 2s, pairing code, Enter')
                 assert not bound['autoConnect']
                 mode='manual';await control('mirror')
                 await until(lambda:matches(phase='live'))
@@ -196,11 +225,43 @@ async def main(binary, demo=False):
                 cf=True
                 await until(lambda:matches(displayPhase='connected-to-controlfloor'))
                 print('PASS manual pairing stops at IP callback; mirroring reaches OCR/admission and waits for server confirmation')
+                await disconnect_client(worker,1,409) # Pairing raced the UI: don't kick a bound client.
                 await control('settings',autoConnect=False)
                 await until(lambda:matches(phase='idle',ip='',savedIP='127.0.0.1'))
                 # A late status from the revoked worker must never restore its binding.
                 await status();await asyncio.sleep(.3)
                 assert not (await row())['airplayConnected']
+                assert any(v['worker']==worker for v in await unpaired())
+                assert not any(v['worker']==worker and v['disconnect'] for v in outputs)
+                # Reuse an existing stream, including a fast callback while Mouse 8 is
+                # still in flight. OCR/admission must wait for input completion.
+                old_code=code;before_replay=mirror_count;mode='reuse';hold_about=True;about_fetched=False
+                async def mirror_ready():return (await row())['actions']['mirror']
+                await until(mirror_ready);await control('mirror')
+                await until(lambda:about_fetched)
+                await asyncio.sleep(.2)
+                assert (await row())['phase']=='waiting-for-about'
+                assert not (await row())['providerConnected']
+                about_release.set();hold_about=False
+                await until(lambda:matches(phase='live'))
+                assert code!=old_code and mirror_count==before_replay
+                before_input=len(calls)
+                await event('message',dict(type='input',connection=1,token=old_code,
+                    request={'action':'typeSpecialKey','tag':'stale','args':{'key':'Backspace'}},args={'key':'Backspace'}))
+                await event('message',dict(type='reset-input',connection=1,token=old_code))
+                await asyncio.sleep(.2)
+                assert len(calls)==before_input and (await row())['phase']=='live'
+                # Reset discards the IP but keeps the stream. Automatic rediscovery
+                # must type a new token, then reuse video without running replay.
+                await control('reset');await until(lambda:matches(phase='idle',ip='',savedIP=''))
+                await until(unpaired)
+                mode='pair';old_code=code;await control('resume')
+                await until(lambda:matches(phase='live'))
+                assert code!=old_code and mirror_count==before_replay
+                assert not await unpaired()
+                print('PASS retained AirPlay, About-only reuse, input-completion gate, stale-token rejection and automatic reset/re-pair without replay')
+                mode='manual';await control('settings',autoConnect=False)
+                await until(lambda:matches(phase='idle',ip='',savedIP='127.0.0.1'))
                 keyboard_log=pathlib.Path(directory)/('keyboard-'+host+'.jsonl')
                 history_before=keyboard_log.read_bytes()
                 http_before=(pathlib.Path(directory)/'http.jsonl').read_bytes()
@@ -221,7 +282,7 @@ async def main(binary, demo=False):
                 assert keyboard_log.read_bytes().startswith(history_before) and len(keyboard_log.read_bytes())>len(history_before)
                 # Pause and resume again in the same coordinator lifetime.
                 await control('settings',autoConnect=False)
-                connected=False;ready=False;worker='receiver-3'
+                connected=False;ready=False;await event('stopped');worker='receiver-3'
                 await until(lambda:matches(phase='idle',ip=''))
                 async def manual_ready():return (await row())['actions']['mirror']
                 await until(manual_ready)

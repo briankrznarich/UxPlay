@@ -14,6 +14,7 @@ async def main(binary):
     recording_b=True
     record={}; http=None; base=''; p=None; output_task=None; status_task=None
     async def event(kind, message=None, id=None):
+        if message is not None:message.setdefault('token',token)
         p.stdin.write((json.dumps({'type':kind,'worker':id or worker,'peer':phone_ip,'message':message or {}})+'\n').encode())
         await p.stdin.drain()
     async def report(command, **extra):
@@ -70,7 +71,7 @@ async def main(binary):
                 capture='replaying'
                 if auto_replay:tasks.append(asyncio.create_task(replay()))
                 return web.json_response({'capture':{'state':'replaying','durationMs':400}})
-            elif key=='GoHome':assert allow_about and ready
+            elif key=='GoHome':pass # Startup sends Home twice; final Home follows OCR.
             elif key=='endCapture':capture='idle'
             elif key=='Backspace':pass
             else:raise AssertionError(body)
@@ -113,12 +114,12 @@ async def main(binary):
                 recording_b=False
                 await until(lambda:any(action=='type' and body['device']=='keyboard-B' for action,body in calls))
                 inventory.remove('keyboard-B')
-                assert [body['key'] for action,body in calls if action=='typeSpecialKey' and body['device']==host]==['Enter','replayCapture']
+                assert [body['key'] for action,body in calls if action=='typeSpecialKey' and body['device']==host]==['GoHome','GoHome','Enter','replayCapture']
                 assert sum(action=='mouseUp' and body['device']==host for action,body in calls)==1,'Coordinator must not double-trigger replay final Mouse 8'
                 assert (await report(pairing_request,pairingId=token,model='iPhone SE',iosVersion='26.6'))[1]['duplicate']
                 code,_=await report(dict(command='prefs-general-about',requestId='stale'));assert code==409
                 ready=True;await until(lambda:admitted)
-                assert any(action=='typeSpecialKey' and body['key']=='GoHome' for action,body in calls)
+                assert sum(action=='typeSpecialKey' and body['key']=='GoHome' and body['device']==host for action,body in calls)==3
                 assert (await fetch())=={'command':'ping','requestId':''}
                 print('PASS startup token callback, IP binding, asynchronous replay + final shortcut fetch, About gate, Home before admission')
                 req={'action':'typeSpecialKey','args':{'key':'Backspace'},'tag':'remote-1','cf':{'d':'airplay-TEST23456789'}}
@@ -140,7 +141,7 @@ async def main(binary):
                 # A reconnect invalidates the whole old binding; old reports cannot complete a new session.
                 connected=False
                 await event('message',{'type':'status','connection':connection+1,'connected':False})
-                await until(lambda:any(v['disconnect'] for v in outputs))
+                await until(lambda:any(v['message'].get('type')=='revoke' for v in outputs))
                 previous=len(calls)
                 await event('message',{'type':'input','connection':connection,'request':req,'args':{}})
                 await asyncio.sleep(.3);assert len(calls)==previous

@@ -17,7 +17,8 @@ workflow remains available without `--controlfloor-lan`.
 - Run iphone-use with keyboard, consumer controls and positioned mouse support.
   Each connected `bluetoothHost` is independently addressable; several phones in
   its inventory are supported. No USB/go-ios/device development mode is used.
-- Save a replay **for each Bluetooth host** in iphone-use. The recording must:
+- Save a replay **for each Bluetooth host** in iphone-use for starting AirPlay
+  when it is not already connected. The recording must:
   1. Open Control Center.
   2. Start Screen Mirroring to this receiver.
   3. Dismiss the mirroring panel and Control Center.
@@ -70,8 +71,12 @@ mouse profile is used without calibration.
 
 1. **Discover and trigger.** Every available, unpaired keyboard with auto-connect
    enabled gets a fresh pairing token such as `01-17-45-07` (four zero-padded
-   `00`–`99` groups). The coordinator sends a button-only Mouse 8 click, waits
-   two seconds, types the token without any `X=` delimiters, then sends Enter.
+   `00`–`99` groups). The coordinator sends the HID Home key, waits one second,
+   sends Home again, waits one second, then sends a button-only Mouse 8 click.
+   After Mouse 8 completes it waits two seconds for Shortcuts to launch and show
+   its prompt, types the token without any `X=` delimiters, then sends Enter.
+   Delays begin after each input job completes and are cancellable coordinator
+   states; they do not block other keyboards or video.
    Button-only clicks preserve the pointer position. The keyboard hardware ID is only the input
    target; it is not typed into the phone.
 2. **Fetch the initial command.** The stateless shortcut makes one
@@ -84,9 +89,15 @@ mouse profile is used without calibration.
    Callback arrival order does not select the keyboard: the typed token does.
    Startup retries stop for that keyboard. Unknown, expired or reused attempts
    cannot establish a binding.
-4. **Queue About, then replay.** The server queues `prefs-general-about` with a
-   fresh request ID **before** invoking iphone-use's `replayCapture`. That helper
-   call only starts playback; it is not evidence that mirroring is ready.
+4. **Reuse AirPlay, or start it.** The server queues `prefs-general-about` with a
+   fresh request ID. If a connected receiver already exists for the bound IPv4
+   address, it binds that worker immediately, skips `replayCapture`, and sends
+   Mouse 8 once to fetch About. This includes a human-started stream and a stream
+   retained after resetting its keyboard. The coordinator waits for the About
+   callback **and completion of the Mouse 8 input job** before allowing OCR.
+   Otherwise, it invokes iphone-use's `replayCapture` after queuing About and
+   follows steps 5–6. That helper call only starts playback; it is not evidence
+   that mirroring is ready. A missing recording does not prevent reuse.
 5. **Match the AirPlay stream.** A receiver worker reports an actual connected
    client and its source IPv4 address. The parent joins it to the keyboard's
    already-confirmed address. Ordinary additional AirPlay TCP connections are
@@ -96,8 +107,10 @@ mouse profile is used without calibration.
    About command. If this fetch races the worker's connection event, HTTP waits
    up to ten seconds for confirmation. No About command is issued to an
    unconfirmed stream. The shortcut opens About, POSTs its result, and exits.
-7. **Read hardware identity.** Only after the About callback **and** a fresh helper
-   status confirming replay completion does the parent enable About OCR. The
+7. **Read hardware identity.** Only after the About callback and navigation
+   completion does the parent enable About OCR. On the replay path this requires
+   a fresh helper status confirming replay completion; on the reuse path it
+   requires the Mouse 8 input job to finish. The
    worker reads name/model/serial, requiring two agreeing reads. LAN mode skips
    the second token-display/OCR step: the typed callback proves keyboard → IP,
    and the IPv4 connection proves IP → video. The original token-OCR gate remains
@@ -108,8 +121,8 @@ mouse profile is used without calibration.
    serial numbers are rejected. The reported `keyboardId` is now the actual
    helper host ID, not the temporary pairing token.
 
-No session ID is stored or supplied by Shortcuts. Internal worker IDs and
-connection revisions guard private process messages; they never become shortcut
+No session ID is stored or supplied by Shortcuts. Internal worker IDs,
+connection revisions and fresh pairing tokens guard private process messages; they never become shortcut
 URL parameters. Every new pairing attempt gets a fresh token. `requestId`
 correlates individual commands and callbacks. Codes use cryptographically random,
 uniform digits (100 million combinations), with duplicates rejected among known
@@ -132,6 +145,7 @@ the dashboard deliberately exposes active codes to its operators.
 - `GET /health`: small JSON health response; no keyboard activity or queue mutation.
 - `GET /api/keyboards`: keyboard snapshot and dashboard mutation token.
 - `POST /api/keyboards/control`: dashboard controls (see below).
+- `POST /api/airplay/disconnect`: explicitly stop one unpaired receiver.
 - `GET /shortcuts/ControlFloorLAN.shortcut`: optional artifact download.
 
 Use the existing ControlFloor `runShortcut` API with
@@ -172,9 +186,16 @@ A missing/empty recording, replay error, vanished keyboard, callback timeout,
 OCR timeout or changed AirPlay session revokes the binding and prevents CF
 admission. Active replay is cancelled best-effort through `endCapture`, and the
 adapter releases held mouse buttons. A startup/retry will not start while helper status
-reports replaying or recording. Reconnect optimization is intentionally deferred: every
-new AirPlay session requires discovery again. A ControlFloor WebSocket reconnect
-alone retains the physical binding and resets pending remote input.
+reports replaying or recording. A working AirPlay transport is retained when a
+keyboard binding fails or is reset. It returns to the unpaired list; the provider
+WebSocket, pending commands, video forwarding and OCR identity are revoked.
+Rediscovery still uses a fresh keyboard token and rereads About, but reuses a
+connected same-IP stream instead of replaying the mirroring script. Late input,
+results, reset notices and OCR work from the previous binding are rejected by
+its token, even when the AirPlay connection itself has not changed.
+A ControlFloor WebSocket reconnect alone retains the physical binding and resets
+pending remote input. Use **Disconnect client** on an unpaired AirPlay row to
+explicitly stop that receiver; this action does not reset keyboard preferences.
 
 Automatic input is intentional: an unpaired keyboard may type the token into
 whatever UI currently has focus if its Mouse 8 binding/setup is wrong. Use the
@@ -246,8 +267,11 @@ Above the keyboard inventory, **Unpaired AirPlay** lists connected receiver
 workers whose source IP has no current keyboard binding. It shows IP, advertised
 client name/ID/model (when supplied), and the time the coordinator first observed
 that AirPlay connection. Periodic status updates do not reset that time. A saved
-IP alone does not count as a current binding. Disconnected or revoked workers
-are omitted; streams disappear from the table once matched. This view is part of
+IP alone does not count as a current binding. Disconnected or explicitly kicked
+workers are omitted; streams disappear from the table once matched. Resetting a
+keyboard returns its retained stream to this table. **Disconnect client** stops
+only that unpaired receiver. A stale click is rejected if its connection revision
+changed or a keyboard has since bound the IP. This view is part of
 the keyboard page and the existing `/api/keyboards` snapshot (`unpairedAirplay`).
 
 Each keyboard shows its phase, current/remembered IP, pairing token, last-read
@@ -261,12 +285,13 @@ and server restarts. Every event includes its pairing code for correlation.
 | Control | Behavior |
 | --- | --- |
 | Auto-connect ON | Start/retry discovery automatically when input is ready; new keyboards default ON. |
-| Auto-connect OFF | Stop the attempt, revoke the active provider/AirPlay worker, cancel replay best-effort, preserve the remembered IP/identity, and allow manual actions. |
+| Auto-connect OFF | Stop the attempt/provider binding, cancel replay best-effort, preserve the AirPlay transport and remembered IP/identity, and allow manual actions. |
 | Mouse 8 | Send one atomic button-only click to this keyboard. Do not type a token or start the rest of pairing. |
-| Pair Keyboard | Pause background startup, queue/initiate the shortcut prompt, type a fresh token and Enter. **Stop after the callback binds the phone IP.** |
-| Start Screen Mirroring | Queue About, run the per-host replay, match AirPlay, read identity, send Home and admit to ControlFloor. |
+| Pair Keyboard | Pause background startup, send Home twice (one-second intervals), click Mouse 8, wait two seconds, then type a fresh token and Enter. **Stop after the callback binds the phone IP.** |
+| Start Screen Mirroring | Reuse a connected same-IP AirPlay stream with Mouse 8 → About, or run replay if none exists; read fresh identity, send Home and admit to ControlFloor. |
 | Resume auto-connect | Enable automatic startup again; if already at the manual paired stage, continue into mirroring. |
-| Reset & pause | Stop the attempt/connection, forget the saved IP and identity, clear the token, and turn auto-connect OFF. |
+| Reset & pause | Stop the attempt/provider binding, forget the saved IP and identity, clear the token, and turn auto-connect OFF. AirPlay remains in the unpaired list. |
+| Disconnect client (unpaired AirPlay table) | Stop the selected AirPlay worker without changing any keyboard preferences. |
 | Friendly label | Save a human-readable label (up to 80 UTF-8 bytes), independent of hardware identity. |
 
 Manual actions pause background startup for this process lifetime, even if the
@@ -304,6 +329,10 @@ Example control body: `{"id":"<bluetoothHost>","action":"pair"}`. Actions are
 `pair`, `mirror`, `mouse8`, `reset`, `resume`, and `settings`; settings accepts
 `autoConnect` and/or `label`. A `202` acknowledges queued work, not completion;
 read the snapshot/events for the outcome. Conflicting input returns `409`.
+The unpaired-client action posts `{"worker":"<worker ID>","connection":<revision>}`
+to `/api/airplay/disconnect` with the same dashboard token/origin checks. It returns
+`202` when a disconnect is queued, `409` for a changed or newly paired connection,
+or `404` if the worker no longer exists.
 
 ## Code boundaries and tests
 
@@ -334,3 +363,12 @@ decoded frames and the provider WebSocket against generated images and a mock
 ControlFloor server. Neither sends input to live phones. Real shortcut permissions,
 replay navigation, LAN reachability and successful Home navigation still require
 hardware verification.
+
+### Manual web mouse calibration
+
+After the keyboard has an active IP binding, its action menu offers **Detect /
+calibrate mouse**, **Calibrate mouse — new profile**, and **Cancel mouse
+calibration**. The LAN shortcut opens a hosted Safari canvas via `open-url`; the
+page measures/validates raw HID movement and the helper commits the resulting
+profile. This does not run automatically. See [MOUSE_CALIBRATION.md](MOUSE_CALIBRATION.md)
+for the flow, coordinate model, reusable assets, and independent hardware-server API.

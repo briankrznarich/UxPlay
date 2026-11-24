@@ -67,12 +67,35 @@ async def main(binary):
                 await until(lambda:any(e.get('type')=='input' for e in events))
                 emitted=next(e for e in events if e.get('type')=='input')
                 assert emitted['args']['modelName']=='iPhone SE' and emitted['connection']==1
-                await command('pairing',message={'type':'input-result','connection':1,'request':emitted['request'],
+                await command('pairing',message={'type':'input-result','connection':1,'token':binding['token'],'request':emitted['request'],
                     'value':{'submitted':True},'error':''})
                 assert (await pending)['value']['submitted']
                 shot=asyncio.create_task(s.command('getScreenshot'));await command('frame',path=str(picture))
                 assert (await shot)['binaryLength']>100
                 print('PASS paired-worker input/reply IPC, trusted model context, independent JPEG screenshot delivery')
+                # Revoking the pairing must close ControlFloor and clear identity,
+                # while keeping this same AirPlay connection and frame source alive.
+                old_token=binding['token']
+                await command('pairing',message={'type':'revoke','connection':1,'token':old_token})
+                await until(lambda:any(e.get('connected') and e.get('connection')==1 and e.get('token')=='' and not e.get('ready') and not e.get('providerConnected') for e in events))
+                binding.update(token='02-18-46-08',about=False,admit=False)
+                await command('pairing',message=binding);await command('frame',path=str(picture));await asyncio.sleep(.4)
+                assert sessions.empty() and not any(e.get('ready') for e in events if e.get('token')==binding['token'])
+                binding['about']=True;await command('pairing',message=binding);await command('frame',path=str(picture))
+                await until(lambda:any(e.get('ready') and e.get('token')==binding['token'] for e in events))
+                assert sessions.empty()
+                binding['admit']=True;await command('pairing',message=binding)
+                udid,s=await asyncio.wait_for(sessions.get(),15);assert udid=='airplay-LANTEST23456'
+                # Late revokes/results from the old pairing must not affect this one.
+                await command('pairing',message={'type':'revoke','connection':1,'token':old_token})
+                assert (await s.command('ping'))['type']=='pong'
+                pending=asyncio.create_task(s.command('typeSpecialKey',{'key':'Backspace'}))
+                await until(lambda:any(e.get('type')=='input' and e.get('token')==binding['token'] for e in events))
+                emitted=next(e for e in events if e.get('type')=='input' and e.get('token')==binding['token'])
+                answer={'type':'input-result','connection':1,'token':old_token,'request':emitted['request'],'value':{'submitted':True},'error':''}
+                await command('pairing',message=answer);await asyncio.sleep(.2);assert not pending.done()
+                answer['token']=binding['token'];await command('pairing',message=answer);assert (await pending)['value']['submitted']
+                print('PASS revoke preserves AirPlay, clears OCR/provider authority, releases device lease, and re-admits with a fresh token; old IPC rejected')
                 await command('disconnect');await command('connect',id='new-airplay-client')
                 await command('pairing',message=binding);await command('frame',path=str(picture))
                 await asyncio.sleep(.7);assert sessions.empty()

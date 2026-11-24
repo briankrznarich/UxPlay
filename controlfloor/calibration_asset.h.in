@@ -1,0 +1,5 @@
+// SPDX-License-Identifier: GPL-3.0-or-later
+#pragma once
+static const char mouseCalibrationHTML[] = R"CF_CAL(@CALIBRATION_HTML@)CF_CAL";
+static const char mouseCalibrationJS[] = R"CF_CAL(@CALIBRATION_JS@)CF_CAL";
+static const char mouseCalibrationPageJS[] = R"CF_CAL(@CALIBRATION_PAGE_JS@)CF_CAL";

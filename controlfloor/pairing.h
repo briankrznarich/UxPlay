@@ -9,7 +9,7 @@ bool isShortcutRequest(const nlohmann::json &request);
 struct PairingOptions {
     std::string helper = "http://127.0.0.1:7390", directory = "log", artifact, database;
     unsigned short port = 9876;
-    double promptDelay = 2, retryDelay = 30, timeout = 120;
+    double homeDelay = 1, promptDelay = 2, retryDelay = 30, timeout = 120;
 };
 struct PairingOutput {
     std::string worker;

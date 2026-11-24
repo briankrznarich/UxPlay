@@ -78,9 +78,10 @@ struct MouseInput::Impl {
         return value;
     }
     void run() {
-        std::string host, error;
+        std::string host, error, calibration;
         bool available = false, keyboardAvailable = false, consumerAvailable = false, enabled = false, held = false;
-        int width = 375, height = 667;
+        int width = 375, height = 667, calibratedWidth = 0, calibratedHeight = 0;
+        J pendingGeometry;
         J mouse = J::object();
         unsigned long observed = 0, probeSequence = 0;
         auto probeAt = Clock::time_point::min();
@@ -93,6 +94,12 @@ struct MouseInput::Impl {
                 } catch (...) {
                 } // Best effort after timeout/disconnect; retry on the next probe/reset.
             }
+        };
+        auto cancelCalibration = [&] {
+            if (calibration.empty()) return;
+            try { call("/mouseCalibration", {{"device",host},{"testVersion",1},{"session",calibration},{"operation","cancel"}}, 3); }
+            catch (...) {} // The helper also expires abandoned sessions.
+            calibration.clear();
         };
         while (true) {
             Job job;
@@ -112,6 +119,7 @@ struct MouseInput::Impl {
                 }
             }
             if (reset) {
+                cancelCalibration();
                 enabled = false;
                 release();
                 probeAt = Clock::time_point::min();
@@ -151,9 +159,10 @@ struct MouseInput::Impl {
                         release();
                     }
                     mouse = hosts[0].value("mouse", J::object());
-                    if (mouse.value("calibrating", false))
+                    if (mouse.value("calibrating", false) && calibration.empty())
                         throw std::runtime_error("iphone-use mouse calibration is busy");
-                    double w = mouse.value("logicalWidth", 375.0), h = mouse.value("logicalHeight", 667.0);
+                    double w = calibratedWidth ? calibratedWidth : mouse.value("logicalWidth", 375.0);
+                    double h = calibratedHeight ? calibratedHeight : mouse.value("logicalHeight", 667.0);
                     if (!std::isfinite(w) || !std::isfinite(h) || w <= 0 || h <= 0 || w > 100000 ||
                         h > 100000)
                         throw std::runtime_error("Invalid iphone-use logical dimensions");
@@ -182,7 +191,26 @@ struct MouseInput::Impl {
                     if (Clock::now() - job.at > std::chrono::seconds(1))
                         throw std::runtime_error("Input command expired; input queue was too slow; nothing "
                                                  "from this call was sent");
-                    if (MouseInput::handlesCatalog(action)) {
+                    if (action == "_mouseCalibration") {
+                        J body = job.args;
+                        body["device"] = host;
+                        std::string operation = body.at("operation");
+                        if (operation == "begin") {
+                            release();
+                            calibration = body.at("session").get<std::string>();
+                            pendingGeometry = nullptr;
+                        }
+                        // One request executes a complete timed trial in the driver.
+                        // Never route these raw counts through mouseMove compensation.
+                        result.value = call("/mouseCalibration", body, 25);
+                        if ((operation == "select" || operation == "prepare") && result.value.contains("profile"))
+                            pendingGeometry = result.value.at("profile");
+                        if (operation == "commit" && pendingGeometry.is_object()) {
+                            calibratedWidth = width = pendingGeometry.at("width").get<int>();
+                            calibratedHeight = height = pendingGeometry.at("height").get<int>();
+                        }
+                        if (operation == "commit" || operation == "cancel") calibration.clear();
+                    } else if (MouseInput::handlesCatalog(action)) {
                         // Discovery is read-only and does not need HID subscriptions.
                         result.value = call("/" + action);
                         result.value["agent"] = "Bluetooth";
@@ -396,6 +424,7 @@ struct MouseInput::Impl {
                                  {"error", error}};
             }
         }
+        cancelCalibration();
         release();
     }
 };
@@ -482,7 +511,11 @@ void MouseInput::submit(const Json &request, const Json &args) {
             throw std::runtime_error(std::string(field) + " must be a nonempty string of at most 128 bytes");
         return value;
     };
-    if (handlesNavigation(action)) {
+    if (action == "_mouseCalibration") {
+        // Private coordinator API: deliberately absent from handles() so it
+        // cannot be invoked directly by a ControlFloor viewer.
+        clean = args;
+    } else if (handlesNavigation(action)) {
         for (auto key : {"gesture", "duration", "x", "y", "orientation", "modelName"})
             if (args.contains(key)) clean[key] = args[key];
         // Validate names/held-button requests on the worker with its current

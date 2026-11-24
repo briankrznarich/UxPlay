@@ -314,7 +314,10 @@ The LAN listener also serves a keyboard dashboard at `http://127.0.0.1:9876/`.
 Its compact table lists known keyboards, pairing stages and live connection state, with manual
 Mouse 8, Pair Keyboard, Start Screen Mirroring, Reset & pause and auto-connect
 controls. Selecting an action executes it immediately; options/events expand under
-the row. Unpaired AirPlay connections appear in a table above the inventory.
+the row. Unpaired AirPlay connections appear in a table above the inventory,
+with an independent Disconnect client button. Resetting a keyboard preserves
+AirPlay; subsequent pairing reuses a same-IP stream and requests About with
+Mouse 8 instead of running the mirroring replay.
 Preferences and remembered IP/identity survive restarts in
 `log/keyboards.sqlite3`; override with `--controlfloor-keyboard-db FILE`.
 SQLite development headers/libraries are required (`libsqlite3-dev` on Debian/
@@ -397,3 +400,7 @@ Live verification remains necessary: two phones, local video/audio, manual
 keyboard/About identification, distinct server devices, orientation changes,
 viewer video control, and disconnect/reconnect. Mock tests do not validate
 AirPlay encryption, phone UI behavior or real-time playback performance.
+
+LAN keyboards also have manual [web mouse calibration](MOUSE_CALIBRATION.md):
+open a Safari canvas through the LAN shortcut, detect an existing profile or run a
+full measured sweep, validate, and activate it through the hardware-server API.

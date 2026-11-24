@@ -231,6 +231,7 @@ struct IdentityGate::Impl {
             if (!running) break;
             auto token = connection;
             auto expected = stage;
+            auto expectedPairing = expectedToken;
             lock.unlock();
             ScreenSample frame = snapshot();
             OCRResult result;
@@ -243,7 +244,8 @@ struct IdentityGate::Impl {
             if (frame.sample) gst_sample_unref(frame.sample);
             lock.lock();
             if (!running) break;
-            if (token != connection || expected != stage || (managed && expected == About && !allowAbout)) continue;
+            if (token != connection || expected != stage || expectedPairing != expectedToken ||
+                (managed && expected == About && !allowAbout)) continue;
             if (!error.empty()) log("ocr-error", error);
             else if (!result.text.empty()) {
                 log("ocr", {{"stage", stage == Keyboard ? "keyboard" : "about"}, {"text", result.text},
@@ -277,7 +279,7 @@ struct IdentityGate::Impl {
             } else log("waiting-for-frame-or-text");
             auto currentStage = stage;
             wake.wait_for(lock, std::chrono::duration<double>(interval), [&] {
-                return !running || token != connection || stage != currentStage;
+                return !running || token != connection || stage != currentStage || expectedPairing != expectedToken;
             });
         }
     }

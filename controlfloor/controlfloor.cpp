@@ -68,9 +68,11 @@ void (*pairingTransport)(const char *) = nullptr;
 std::mutex pairingMutex;
 std::deque<J> pairingMessages;
 J binding = J::object(); // Network thread only.
+std::string pairingToken; // Protected by pairingMutex; socket callbacks also report it.
 J remoteInput = J::object();
 void pairingSend(J message) {
     message["connection"] = connectionRevision.load();
+    { std::lock_guard<std::mutex> lock(pairingMutex); message["token"] = pairingToken; }
     if (pairingTransport) pairingTransport(message.dump().c_str());
 }
 void resetInput() {
@@ -806,6 +808,20 @@ void network() {
                 online = false;
         }
     });
+    auto revokeProvider = [&] {
+        active=false;
+        cfSocket.stop(); // Join old callbacks before changing the binding token.
+        online=false; serverConfirmed=false;
+        resetInput();
+        deviceLease.release(); inputLease.release();
+        forwarding=false; screenshotDemand=false; screenshot=nullptr; flights.clear();
+        invalidate(true); // Preserve local AirPlay playback and the latest decoded frame.
+        { std::lock_guard<std::mutex> lock(commandMutex); commands.clear(); }
+        binding=J::object(); remoteInput=J::object();
+        { std::lock_guard<std::mutex> lock(pairingMutex); pairingToken.clear(); }
+        identityGate.pairing(connectionRevision.load(),"",false);
+        attempt=0; leaseWarning=false; claimAt=Clock::now(); retry=claimAt; dirty=true;
+    };
     while (running) {
         auto now = Clock::now();
         unsigned long revision = connectionRevision;
@@ -820,6 +836,10 @@ void network() {
             forwarding = false; screenshotDemand = false; screenshot = nullptr;
             flights.clear();
             { std::lock_guard<std::mutex> l(commandMutex); commands.clear(); }
+            if (opt.lan) {
+                binding=J::object(); remoteInput=J::object();
+                std::lock_guard<std::mutex> lock(pairingMutex); pairingToken.clear();
+            }
             observedConnection = revision;
             attempt = 0;
             leaseWarning = false; claimAt = now;
@@ -832,18 +852,21 @@ void network() {
                 if (message.value("connection",0UL) != revision) continue;
                 std::string kind = message.value("type", "");
                 if (kind == "binding") {
+                    std::string nextToken=message.value("token","");
+                    if (nextToken!=binding.value("token","")) revokeProvider();
                     binding = message;
+                    { std::lock_guard<std::mutex> lock(pairingMutex); pairingToken=nextToken; }
                     remoteInput = message.value("input",J::object());
                     identityGate.pairing(revision,message.value("token", ""),message.value("about",false));
-                } else if (kind == "input-result" && active && online) {
+                } else if (kind == "input-result" && active && online && message.value("token","")==binding.value("token","")) {
                     send(reply(message.at("request"),message.value("value",J()),message.value("error", "")));
-                } else if (kind == "shortcut-progress" && active && online) {
+                } else if (kind == "shortcut-progress" && active && online && message.value("token","")==binding.value("token","")) {
                     J progress = notice("ShortcutProgress",message.at("value"));
                     for (auto key : {"cf","tag","events"})
                         if (message.at("request").contains(key)) progress[key] = message.at("request")[key];
                     send(progress);
-                } else if (kind == "revoke") {
-                    active = false; binding = J::object(); remoteInput = J::object(); cfSocket.stop();
+                } else if (kind == "revoke" && message.value("token","")==binding.value("token","")) {
+                    revokeProvider();
                 }
             }
             if (now >= pairingStatusAt) {

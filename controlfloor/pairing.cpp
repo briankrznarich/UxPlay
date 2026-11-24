@@ -3,6 +3,7 @@
 #include "mouse_input.h"
 #include "keyboard_store.h"
 #include "dashboard_asset.h"
+#include "calibration_asset.h"
 #include <ixwebsocket/IXHttpClient.h>
 #include <ixwebsocket/IXHttpServer.h>
 #include <glib.h>
@@ -158,6 +159,9 @@ struct PairingCoordinator::Impl {
         bool autoConnect = true, manualHold = false, continueAfterPair = true, adapterStarted = false;
         std::string lastIP, label, pendingManual, operation, expectedSerial;
         J lastIdentity = J::object(), history = J::array();
+        J calibration = J::object();
+        std::string calibrationReturnPhase;
+        double calibrationContact = 0;
         int64_t lastSeen = 0;
         double savedAt = 0;
         bool replayRequested = false;
@@ -182,6 +186,7 @@ struct PairingCoordinator::Impl {
     std::map<std::string,std::unique_ptr<Keyboard>> keyboards;
     std::map<std::string,Worker> workers;
     std::map<std::string,Bootstrap> bootstrap;
+    std::map<std::string,std::string> shortcutAddresses; // peer -> accepted local destination
     std::map<std::string,std::pair<std::string,double>> receipts; // requestId -> peer/expiry
     std::deque<PairingOutput> outputs;
     std::set<std::string> retiredWorkers;
@@ -231,6 +236,11 @@ struct PairingCoordinator::Impl {
     void output(const std::string &worker, J message, bool disconnect = false) {
         if (worker.empty()) return;
         if (disconnect) retiredWorkers.insert(worker);
+        // Never let snapshot coalescing move a new binding ahead of its revoke.
+        if (disconnect || message.value("type","")=="revoke")
+            outputs.erase(std::remove_if(outputs.begin(),outputs.end(),[&](const PairingOutput &item) {
+                return item.worker==worker && item.message.value("type","")=="binding";
+            }),outputs.end());
         // Replace unsent state snapshots. Input replies are ordered and bounded.
         if (message.value("type", "") == "binding")
             for (auto &item : outputs) if (item.worker == worker && item.message.value("type", "") == "binding") {
@@ -243,7 +253,7 @@ struct PairingCoordinator::Impl {
     void state(Keyboard &k) {
         if (k.worker.empty()) return;
         output(k.worker, {{"type","binding"}, {"connection",k.connection}, {"token",k.token},
-            {"keyboard",k.host}, {"about",k.reported && k.replayDone}, {"admit",k.phase == "live" || k.phase == "shortcut"},
+            {"keyboard",k.host}, {"about",k.phase=="reading-about" || k.phase=="going-home" || k.phase=="live" || k.phase=="shortcut" || (k.phase=="calibration" && k.calibrationReturnPhase=="live")}, {"admit",k.phase == "live" || k.phase == "shortcut" || (k.phase=="calibration" && k.calibrationReturnPhase=="live")},
             {"input",k.input.state()}});
     }
     Keyboard *byIP(const std::string &ip) {
@@ -257,22 +267,25 @@ struct PairingCoordinator::Impl {
     void result(Keyboard &k, const J &request, const J &value, const std::string &error = "") {
         J route=J::object();
         for (auto key : {"action","cf","tag","events"}) if (request.contains(key)) route[key]=request[key];
-        J message={{"type","input-result"}, {"connection",k.connection}, {"request",route}, {"value",value}, {"error",error}};
+        J message={{"type","input-result"}, {"connection",k.connection}, {"token",k.token}, {"request",route}, {"value",value}, {"error",error}};
         if (message.dump().size()>4096) { message["value"]=nullptr; message["error"]="Shortcut/input result exceeds the 4 KiB worker message limit"; }
         output(k.worker,std::move(message));
     }
-    void fail(Keyboard &k, const std::string &error) {
+    void fail(Keyboard &k, const std::string &error, bool disconnect = false) {
         if (k.phase == "failed") return;
         log(k,"pairing-failed",error); k.error = error;
         if (!k.remoteShortcut.is_null()) result(k,k.remoteShortcut,nullptr,error);
         for (const auto &entry : k.work)
             if (entry.second.operation == "remote") result(k,entry.second.request,nullptr,error);
         k.input.reset(); k.work.clear();
+        if (k.calibration.value("active",false)) {
+            k.calibration["active"]=false; k.calibration["error"]=error;
+        }
         if (k.replayRequested) {
             try { task(k,"cancel-replay","typeSpecialKey",{{"key","endCapture"}}); }
             catch (const std::exception &e) { log(k,"replay-cancel-failed",e.what()); }
         }
-        output(k.worker,{{"type","revoke"},{"connection",k.connection}},true);
+        output(k.worker,{{"type","revoke"},{"connection",k.connection},{"token",k.token}},disconnect);
         k.operation = "Failed: " + error;
         k.pendingManual.clear();
         k.phase = "failed"; k.due = now() + opt.retryDelay;
@@ -310,15 +323,37 @@ struct PairingCoordinator::Impl {
             Bootstrap request; request.requestId=uuid(); request.at=k.started; request.fetched=false;
             bootstrap[k.lastIP]=request;
         }
-        k.phase = "starting"; k.initialReport = k.fetched = k.reported = k.replayDone = false;
+        k.phase = "going-home-for-pairing"; k.initialReport = k.fetched = k.reported = k.replayDone = false;
         k.ip.clear(); k.worker.clear(); k.error.clear(); k.identity = J::object();
         k.deadline = now()+opt.retryDelay; log(k,"startup",{{"log",keyboardLogPath(k)}});
-        task(k,"startup-click","clickMouseButton",{{"button",8}});
+        k.operation="Sending first Home key";
+        task(k,"startup-home-first","simulateHomeButton");
     }
     void completed(Keyboard &k, MouseInput::Result &r) {
         std::string id = r.request.value("_pairingTask", "");
         auto it = k.work.find(id); if (it == k.work.end()) return;
         Work work = it->second; k.work.erase(it);
+        if (work.operation == "calibration") {
+            k.calibration["busy"]=false;
+            k.calibration["result"]=r.value;
+            k.calibration["error"]=r.error;
+            const std::string operation=work.request.at("operation");
+            log(k,"mouse-calibration-result",{{"operation",operation},{"result",r.value},{"error",r.error}});
+            if (operation=="commit" || operation=="cancel" || !r.error.empty()) {
+                k.calibration["active"]=false;
+                k.phase=k.calibrationReturnPhase;
+                k.requestId.clear();
+                k.operation=operation=="commit" && r.error.empty() ? "Mouse calibrated: "+r.value.value("name","") : "Mouse calibration stopped";
+                k.error=r.error;
+                if (!r.error.empty()) k.input.reset();
+                state(k);
+            }
+            return;
+        }
+        if (work.operation == "calibration-launch") {
+            if (!r.error.empty()) stopCalibration(k,r.error);
+            return;
+        }
         if (work.operation == "cancel-replay") {
             if (!r.error.empty()) log(k,"replay-cancel-failed",r.error);
             else { k.replayRequested=false; log(k,"replay-cancelled"); }
@@ -331,7 +366,16 @@ struct PairingCoordinator::Impl {
         }
         if (work.operation == "remote") { result(k,work.request,r.value,r.error); return; }
         if (!r.error.empty()) { fail(k,r.error); return; }
-        if (work.operation == "startup-click") { k.phase = "prompt-delay"; k.due = now()+opt.promptDelay; }
+        if (work.operation == "startup-home-first") {
+            k.phase="home-key-delay"; k.due=now()+opt.homeDelay;
+            k.operation="Waiting before second Home key"; log(k,"startup-home",{{"press",1}});
+        } else if (work.operation == "startup-home-second") {
+            k.phase="shortcut-launch-delay"; k.due=now()+opt.homeDelay;
+            k.operation="Waiting before Mouse 8"; log(k,"startup-home",{{"press",2}});
+        } else if (work.operation == "startup-click") {
+            k.phase = "prompt-delay"; k.due = now()+opt.promptDelay;
+            k.operation="Waiting for shortcut prompt";
+        }
         else if (work.operation == "startup-type") task(k,"startup-enter","typeSpecialKey",{{"key","Enter"}});
         else if (work.operation == "startup-enter") k.phase = "awaiting-initial-report";
         else if (work.operation == "replay") {
@@ -342,9 +386,27 @@ struct PairingCoordinator::Impl {
             k.phase = "live"; k.operation="Waiting for ControlFloor";
             k.lastIdentity=k.identity; save(k); log(k,"live",k.identity); state(k);
         } else if (work.operation == "shortcut-click") log(k,"shortcut-triggered");
+        else if (work.operation == "about-click") log(k,"about-shortcut-triggered");
     }
     bool quiescent(const Keyboard &k) const {
         return k.phase=="idle" || k.phase=="failed" || k.phase=="remembered" || k.phase=="paired";
+    }
+    bool bindExisting(Keyboard &k) {
+        if (k.ip.empty() || !k.initialReport) return false;
+        auto selected=workers.end();
+        for (auto it=workers.begin(); it!=workers.end(); ++it) {
+            const auto &worker=it->second;
+            if (!worker.connected || worker.peer!=k.ip || retiredWorkers.count(it->first)) continue;
+            auto owner=byWorker(it->first);
+            if (owner && owner!=&k) continue;
+            if (selected==workers.end() || worker.connectedAt>selected->second.connectedAt) selected=it;
+        }
+        if (selected==workers.end()) return false;
+        if (k.worker!=selected->first || k.connection!=selected->second.connection) {
+            k.worker=selected->first; k.connection=selected->second.connection;
+            log(k,"airplay-ip-bound",{{"existing",true}});
+        }
+        state(k); return true;
     }
     void startMirroring(Keyboard &k) {
         if (k.ip.empty()) {
@@ -355,9 +417,41 @@ struct PairingCoordinator::Impl {
             log(k,"saved-ip-binding-resumed",k.ip);
         }
         command(k,{{"command","prefs-general-about"}});
+        if (bindExisting(k)) {
+            k.replayRequested=false; k.replayDone=true;
+            k.phase="waiting-for-about"; k.operation="Reusing AirPlay; requesting About screen";
+            log(k,"airplay-reused",{{"worker",k.worker},{"connection",k.connection}});
+            state(k);
+            task(k,"about-click","clickMouseButton",{{"button",8}});
+            return;
+        }
         k.phase="starting-replay"; k.replayRequested=true; k.replayDone=false; k.replayProbe=0;
         k.operation="Starting screen mirroring";
         task(k,"replay","typeSpecialKey",{{"key","replayCapture"}});
+    }
+    std::string calibrationURL(const Keyboard &k) {
+        auto address=shortcutAddresses.find(k.ip);
+        if (address==shortcutAddresses.end() || !ipv4(address->second))
+            throw std::runtime_error("No local destination recorded for this phone; invoke its LAN shortcut again");
+        return "http://"+address->second+":"+std::to_string(opt.port)+"/mouse-calibration#"+k.calibration.at("session").get<std::string>();
+    }
+    void stopCalibration(Keyboard &k, const std::string &error) {
+        k.input.reset(); k.work.clear(); // Adapter cancels its own raw-HID session.
+        k.calibration["active"]=false; k.calibration["busy"]=false; k.calibration["error"]=error;
+        k.phase=k.calibrationReturnPhase; k.requestId.clear();
+        k.error=error; k.operation=error.empty() ? "Mouse calibration cancelled" : "Mouse calibration failed";
+        log(k,"mouse-calibration-stopped",error); state(k);
+    }
+    void startCalibration(Keyboard &k, bool force) {
+        k.calibrationReturnPhase=k.phase;
+        k.calibration={{"session",uuid()},{"active",true},{"busy",false},{"job",0},
+            {"force",force},{"result",nullptr},{"error",""},{"status","Opening Safari"}};
+        k.calibrationContact=now();
+        k.calibration["url"]=calibrationURL(k);
+        command(k,{{"command","open-url"},{"url",k.calibration["url"]}});
+        k.phase="calibration"; k.operation="Mouse calibration: opening Safari";
+        log(k,"mouse-calibration-started",{{"force",force},{"session",k.calibration["session"]}});
+        task(k,"calibration-launch","clickMouseButton",{{"button",8}});
     }
     void reset(Keyboard &k, bool forget) {
         std::string oldIP=k.ip;
@@ -381,7 +475,13 @@ struct PairingCoordinator::Impl {
             std::string action=k.pendingManual; k.pendingManual.clear();
             if (action=="pair") { k.continueAfterPair=false; begin(k); }
             else if (action=="mirror") startMirroring(k);
+            else if (action=="calibrate" || action=="calibrate-new") startCalibration(k,action=="calibrate-new");
             else if (action=="mouse8") task(k,"manual-click","clickMouseButton",{{"button",8}});
+            return;
+        }
+        if (k.phase=="calibration") {
+            if (!k.present) stopCalibration(k,"Keyboard disappeared during calibration");
+            else if (now()-k.calibrationContact>60) stopCalibration(k,"Calibration page timed out");
             return;
         }
         if ((k.phase == "idle" || k.phase == "failed" || k.phase == "remembered") &&
@@ -402,6 +502,14 @@ struct PairingCoordinator::Impl {
             } else if (action=="getDeviceName") resultValue=value.value("deviceName",J());
             result(k,k.remoteShortcut,resultValue,error);
             k.remoteShortcut=nullptr; k.remoteReport=nullptr; k.phase="live"; k.requestId.clear();
+        }
+        if (k.phase=="home-key-delay" && now()>=k.due) {
+            k.phase="going-home-for-pairing"; k.operation="Sending second Home key";
+            task(k,"startup-home-second","simulateHomeButton");
+        }
+        if (k.phase=="shortcut-launch-delay" && now()>=k.due) {
+            k.phase="starting"; k.operation="Opening shortcut with Mouse 8";
+            task(k,"startup-click","clickMouseButton",{{"button",8}});
         }
         if (k.phase == "prompt-delay" && now() >= k.due) {
             k.phase = "typing-token";
@@ -424,9 +532,13 @@ struct PairingCoordinator::Impl {
                 log(k,"about-ocr-enabled");
             }
         }
+        if (k.phase=="waiting-for-about" && k.reported && k.work.empty() && k.input.idle()) {
+            k.phase="reading-about"; k.deadline=now()+opt.timeout;
+            log(k,"about-ocr-enabled"); state(k);
+        }
         if (k.phase == "reading-about") {
             auto it = workers.find(k.worker);
-            if (it != workers.end() && it->second.progress.value("ready",false)) {
+            if (it != workers.end() && it->second.progress.value("token","")==k.token && it->second.progress.value("ready",false)) {
                 k.identity = it->second.progress.value("identity",J::object());
                 std::string serial = k.identity.value("serialNumber", "");
                 if (serial.empty() || k.identity.value("keyboardId", "") != k.token) return;
@@ -501,7 +613,7 @@ struct PairingCoordinator::Impl {
         if (k) {
             // Replay's final Mouse 8 may race the AirPlay event pipe. Never hand
             // out About until an actual receiver worker confirms this IPv4 peer.
-            if (!k->requestId.empty() && !k->fetched && k->worker.empty()) {
+            if (!k->requestId.empty() && !k->fetched && k->worker.empty() && k->command=="prefs-general-about") {
                 wake.wait_for(lock,std::chrono::seconds(10),[&] { return !running || k->phase=="failed" || !k->worker.empty(); });
                 if (!running || k->phase=="failed") return response({{"error","Pairing expired"}},409);
                 if (k->worker.empty()) { fail(*k,"Shortcut requested About before AirPlay arrived"); return response({{"error","AirPlay connection not confirmed"}},409); }
@@ -551,14 +663,14 @@ struct PairingCoordinator::Impl {
             if (!k || status!="ok") return response({{"error","Unknown or expired keyboard pairing token"}},409);
             if (auto old=byIP(ip)) if (old!=k) fail(*old,"IPv4 address claimed by a new pairing attempt");
             k->ip=ip; k->lastIP=ip; k->initialReport=true; k->deadline=now()+opt.timeout; k->metadata=value;
-            save(*k); log(*k,"keyboard-ip-bound",value); bootstrap.erase(initial);
+            save(*k); log(*k,"keyboard-ip-bound",value); bootstrap.erase(initial); bindExisting(*k);
         } else {
             Keyboard *k=byIP(ip);
             if (!k || k->requestId!=id || k->command!=cmd || !k->fetched || now()>k->deadline)
                 return response({{"error","Unknown, stale or wrong-peer shortcut report"}},409);
             if (status=="progress") {
                 log(*k,"shortcut-progress",value);
-                if (!k->remoteShortcut.is_null()) output(k->worker,{{"type","shortcut-progress"},{"connection",k->connection},
+                if (!k->remoteShortcut.is_null()) output(k->worker,{{"type","shortcut-progress"},{"connection",k->connection},{"token",k->token},
                     {"request",k->remoteShortcut},{"value",value}});
                 return response({{"ok",true}});
             }
@@ -568,7 +680,10 @@ struct PairingCoordinator::Impl {
                 // A fast callback can arrive during Mouse 8's HTTP request.
                 // Complete only after that trigger has released its button.
                 k->remoteReport=value;
-            } else if (status=="error") fail(*k,value.value("error","Shortcut failed"));
+            } else if (status=="error") {
+                if (k->phase=="calibration") stopCalibration(*k,value.value("error","Shortcut failed"));
+                else fail(*k,value.value("error","Shortcut failed"));
+            }
             state(*k);
         }
         if (receipts.size()<2048) receipts[id]={ip,now()+opt.timeout};
@@ -586,7 +701,7 @@ struct PairingCoordinator::Impl {
             bool controllable=ready && free && (quiescent(k) || k.phase=="live");
             bool cf=false, transport=false;
             auto worker=workers.find(k.worker);
-            if (worker!=workers.end()) {
+            if (worker!=workers.end() && worker->second.progress.value("token","")==k.token) {
                 cf=worker->second.progress.value("providerConnected",false);
                 transport=worker->second.progress.value("providerTransportOpen",false);
             }
@@ -597,10 +712,13 @@ struct PairingCoordinator::Impl {
                 {"autoConnect",k.autoConnect},{"manualHold",k.manualHold},{"phase",k.phase},{"displayPhase",display},
                 {"pairingCode",k.token},{"ip",k.ip},{"savedIP",k.lastIP},{"bindingVerified",!k.ip.empty() && k.initialReport && k.expectedSerial.empty()},
                 {"identity",k.lastIdentity},{"metadata",k.metadata},{"lastSeen",k.lastSeen},{"error",k.error},
-                {"operation",k.operation},{"pendingAction",k.pendingManual},{"inputReady",ready},{"captureState",capture},
+                {"calibration",k.calibration},{"operation",k.operation},{"pendingAction",k.pendingManual},{"inputReady",ready},{"captureState",capture},
                 {"airplayConnected",!k.worker.empty()},{"providerConnected",cf},{"providerTransportOpen",transport},
                 {"retryIn",k.autoConnect && !k.manualHold && k.phase=="failed" ? std::max(0.0,k.due-now()) : 0},
                 {"actions",{{"mouse8",controllable},{"pair",controllable},
+                    {"calibrate",controllable && !k.ip.empty() && k.initialReport},
+                    {"calibrate-new",controllable && !k.ip.empty() && k.initialReport},
+                    {"cancel-calibration",k.phase=="calibration"},
                     {"mirror",controllable && quiescent(k) && (!k.ip.empty() || !k.lastIP.empty())},{"reset",true},{"resume",true}}},
                 {"history",k.history}});
         }
@@ -635,19 +753,24 @@ struct PairingCoordinator::Impl {
             }
             if (body.contains("label")) k.label=body["label"].get<std::string>();
             save(k);
+        } else if (action=="cancel-calibration") {
+            if (k.phase!="calibration") return response({{"error","No active calibration"}},409);
+            stopCalibration(k,"");
         } else if (action=="reset") reset(k,true);
         else if (action=="resume") {
             k.autoConnect=true; k.manualHold=false; k.due=0;
             if (k.phase=="paired") k.pendingManual="mirror";
             save(k); log(k,"auto-connect-enabled");
         } else {
-            if (action!="mouse8" && action!="pair" && action!="mirror") return response({{"error","Unknown keyboard action"}},400);
+            if (action!="mouse8" && action!="pair" && action!="mirror" && action!="calibrate" && action!="calibrate-new") return response({{"error","Unknown keyboard action"}},400);
             auto input=k.input.state();
             std::string capture=input.value("mouse",J::object()).value("capture",J::object()).value("state","");
             if (!k.present || !input.value("keyboardAvailable",false) || !input.value("available",false))
                 return response({{"error","Keyboard/mouse is not ready"}},409);
             if (!k.work.empty() || !k.input.idle() || !k.pendingManual.empty() || capture=="recording" || capture=="replaying" ||
                 (!quiescent(k) && k.phase!="live")) return response({{"error","Keyboard is busy; turn auto-connect off to stop it first"}},409);
+            if ((action=="calibrate" || action=="calibrate-new") && (k.ip.empty() || !k.initialReport))
+                return response({{"error","Pair Keyboard first to learn the phone IP"}},409);
             if (action=="mirror" && (k.phase=="live" || (k.ip.empty() && k.lastIP.empty())))
                 return response({{"error","Pair Keyboard first, or pause an existing connection before restarting mirroring"}},409);
             if (!acquire(k)) return response({{"error","Keyboard is owned by another UxPlay process"}},409);
@@ -659,9 +782,52 @@ struct PairingCoordinator::Impl {
         }
         wake.notify_all(); return response({{"ok",true},{"action",action}},202);
     }
+    ix::HttpResponsePtr calibrationRequest(const std::string &ip, const J &body) {
+        std::lock_guard<std::mutex> lock(mutex);
+        Keyboard *k=byIP(ip);
+        if (!k || !body.is_object() || !body.contains("session") ||
+            k->calibration.value("session","").empty() || body["session"]!=k->calibration["session"])
+            return response({{"error","Unknown, stale or wrong-phone calibration session"}},409);
+        std::string operation=body.value("operation","");
+        k->calibrationContact=now();
+        if (operation=="status") { J value=k->calibration; value["inputIdle"]=k->work.empty() && k->input.idle(); return response(value); }
+        if (!k->calibration.value("active",false)) return response({{"error","Calibration has ended"}},409);
+        if (operation=="abort") {
+            stopCalibration(*k,body.value("error","Calibration page cancelled")); return response(k->calibration);
+        }
+        if (k->calibration.value("busy",false) || !k->work.empty() || !k->input.idle())
+            return response({{"error","Previous calibration operation is still running"}},409);
+        static const std::set<std::string> operations={"begin","profiles","trial","select","prepare","commit","cancel"};
+        if (!operations.count(operation)) return response({{"error","Unknown calibration operation"}},400);
+        J args=body;
+        // Routing and force policy belong to the coordinator, never to page input.
+        args.erase("device"); args.erase("mac"); args.erase("error"); args.erase("label");
+        args["testVersion"]=1; args["force"]=k->calibration.at("force");
+        args["deviceID"]="airplay-"+k->lastIdentity.value("serialNumber",k->host);
+        std::string label=body.value("label",operation).substr(0,120);
+        k->calibration["status"]=label; k->operation="Mouse calibration: "+label;
+        k->calibration["job"]=k->calibration.value("job",0)+1;
+        k->calibration["busy"]=true; k->calibration["error"]=""; k->calibration["result"]=nullptr;
+        task(*k,"calibration","_mouseCalibration",args,{{"operation",operation}});
+        wake.notify_all(); return response(k->calibration,202);
+    }
+    ix::HttpResponsePtr disconnectAirplay(const J &body) {
+        if (!body.is_object() || !body.value("worker",J()).is_string() ||
+            !body.value("connection",J()).is_number_unsigned()) return response({{"error","Worker and connection revision are required"}},400);
+        std::lock_guard<std::mutex> lock(mutex);
+        std::string id=body["worker"];
+        auto it=workers.find(id);
+        if (it==workers.end()) return response({{"error","AirPlay client no longer exists"}},404);
+        if (!it->second.connected || retiredWorkers.count(id) || body["connection"]!=it->second.connection)
+            return response({{"error","AirPlay connection changed; refresh and try again"}},409);
+        if (byIP(it->second.peer)) return response({{"error","Client is now paired; reset the keyboard binding before disconnecting"}},409);
+        output(id,J::object(),true);
+        logHttp({{"event","airplay-disconnect-requested"},{"worker",id},{"peer",it->second.peer},{"connection",it->second.connection}});
+        return response({{"ok",true}},202);
+    }
     ix::HttpResponsePtr loggedHandle(ix::HttpRequestPtr request, std::shared_ptr<ix::ConnectionState> connection) {
         double started = now();
-        J common = {{"httpId",uuid()}, {"peer",connection->getRemoteIp()}, {"port",connection->getRemotePort()},
+        J common = {{"httpId",uuid()}, {"localIP",connection->getLocalIp()}, {"peer",connection->getRemoteIp()}, {"port",connection->getRemotePort()},
             {"method",request->method}, {"uri",request->uri}};
         J arrival = common;
         arrival["event"] = "http-request"; arrival["headers"] = request->headers;
@@ -679,7 +845,8 @@ struct PairingCoordinator::Impl {
         std::string path = request->uri.substr(0,request->uri.find('?'));
         // Preserve command/error responses; avoid duplicating every dashboard snapshot,
         // HTML page and downloadable shortcut. All incoming bodies are kept in full.
-        if (path!="/" && path!="/api/keyboards" && path!="/shortcuts/ControlFloorLAN.shortcut")
+        if (path!="/" && path!="/api/keyboards" && path!="/shortcuts/ControlFloorLAN.shortcut" && path!="/mouse-calibration" &&
+            path!="/mouse-calibration.js" && path!="/mouse-calibration-page.js")
             logBody(completion, reply->body);
         else completion["bodyOmitted"] = true;
         logHttp(std::move(completion));
@@ -688,16 +855,32 @@ struct PairingCoordinator::Impl {
     ix::HttpResponsePtr handle(ix::HttpRequestPtr request, std::shared_ptr<ix::ConnectionState> connection) {
         try {
             std::string ip=connection->getRemoteIp(), path=request->uri.substr(0,request->uri.find('?'));
+            if ((path=="/shortcuts/next" || path=="/shortcuts/report") && ipv4(connection->getLocalIp())) {
+                std::lock_guard<std::mutex> lock(mutex);
+                if (shortcutAddresses.size()<2048 || shortcutAddresses.count(ip)) shortcutAddresses[ip]=connection->getLocalIp();
+            }
             if (!ipv4(ip)) return response({{"error","IPv4 LAN required"}},400);
+            if (request->method=="GET" && (path=="/mouse-calibration" || path=="/mouse-calibration.js" || path=="/mouse-calibration-page.js"))
+                return std::make_shared<ix::HttpResponse>(200,"OK",ix::HttpErrorCode::Ok,
+                    ix::WebSocketHttpHeaders{{"Content-Type",path=="/mouse-calibration" ? "text/html; charset=utf-8" : "text/javascript; charset=utf-8"},
+                        {"Cache-Control","no-store"},{"Connection","close"},{"X-Frame-Options","DENY"},{"X-Content-Type-Options","nosniff"}},
+                    path=="/mouse-calibration" ? mouseCalibrationHTML : path=="/mouse-calibration.js" ? mouseCalibrationJS : mouseCalibrationPageJS);
+            if (request->method=="POST" && path=="/api/calibration") {
+                auto origin=request->headers.find("Origin"), host=request->headers.find("Host");
+                if (origin!=request->headers.end() && (host==request->headers.end() || origin->second!="http://"+host->second))
+                    return response({{"error","Cross-origin calibration is not allowed"}},403);
+                if (request->body.size()>65536) return response({{"error","Calibration request too large"}},413);
+                return calibrationRequest(ip,J::parse(request->body));
+            }
             if (request->method=="GET" && path=="/api/keyboards") return response(dashboard());
-            if (request->method=="POST" && path=="/api/keyboards/control") {
+            if (request->method=="POST" && (path=="/api/keyboards/control" || path=="/api/airplay/disconnect")) {
                 auto key=request->headers.find("X-UxPlay-Token");
                 if (key==request->headers.end() || key->second!=mutationToken) return response({{"error","Reload the dashboard before sending commands"}},403);
                 auto origin=request->headers.find("Origin"), host=request->headers.find("Host");
                 if (origin!=request->headers.end() && (host==request->headers.end() || origin->second!="http://"+host->second))
                     return response({{"error","Cross-origin controls are not allowed"}},403);
                 if (request->body.size()>4096) return response({{"error","Control request too large"}},413);
-                return control(J::parse(request->body));
+                return path=="/api/airplay/disconnect" ? disconnectAirplay(J::parse(request->body)) : control(J::parse(request->body));
             }
             if (request->method=="GET" && path=="/")
                 return std::make_shared<ix::HttpResponse>(200,"OK",ix::HttpErrorCode::Ok,
@@ -824,7 +1007,7 @@ void PairingCoordinator::event(const std::string &type,const std::string &id,con
             impl->wake.notify_all(); return;
         }
         auto k=impl->byWorker(id);
-        if (!k || message.value("connection",0UL)!=k->connection) return;
+        if (!k || message.value("connection",0UL)!=k->connection || message.value("token","")!=k->token) return;
         if (kind=="reset-input") {
             if (k->phase=="live" || k->phase=="shortcut") {
                 k->input.reset(); k->work.clear(); k->remoteShortcut=nullptr;
@@ -851,7 +1034,7 @@ void PairingCoordinator::event(const std::string &type,const std::string &id,con
             } else impl->result(*k,request,nullptr,"Unsupported input action");
         }
     } catch (const std::exception &e) {
-        if (auto k=impl->byWorker(id)) impl->fail(*k,std::string("Invalid worker message: ")+e.what());
+        if (auto k=impl->byWorker(id)) impl->fail(*k,std::string("Invalid worker message: ")+e.what(),true);
     }
 }
 } // namespace controlfloor

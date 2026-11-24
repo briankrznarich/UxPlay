@@ -14,6 +14,7 @@ FetchContent_Declare(ixwebsocket
   GIT_REPOSITORY https://github.com/machinezone/IXWebSocket.git
   GIT_TAG 2efe037c9cc96fd536774f17bdb5215161ee5087)
 FetchContent_MakeAvailable(ixwebsocket)
+include(cmake/ix_local_address.cmake)
 FetchContent_Declare(cf_json
   URL https://raw.githubusercontent.com/nlohmann/json/v3.11.3/single_include/nlohmann/json.hpp
   URL_HASH SHA256=9bea4c8066ef4a1c206b2be5a36302f8926f7fdc6087af5d20b417d0cf103ea6
@@ -28,6 +29,13 @@ target_link_libraries(controlfloor_identity PUBLIC PkgConfig::CF_GST PkgConfig::
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/dashboard.html")
 file(READ "${CMAKE_CURRENT_SOURCE_DIR}/dashboard.html" KEYBOARD_DASHBOARD_HTML)
 configure_file(dashboard_asset.h.in dashboard_asset.h @ONLY)
+foreach(asset calibration.html calibration.js calibration_page.js)
+  set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS "${CMAKE_CURRENT_SOURCE_DIR}/${asset}")
+endforeach()
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/calibration.html" CALIBRATION_HTML)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/calibration.js" CALIBRATION_JS)
+file(READ "${CMAKE_CURRENT_SOURCE_DIR}/calibration_page.js" CALIBRATION_PAGE_JS)
+configure_file(calibration_asset.h.in calibration_asset.h @ONLY)
 add_library(controlfloor STATIC controlfloor.cpp mouse_input.cpp navigation.cpp pairing.cpp keyboard_store.cpp test_source.cpp)
 target_include_directories(controlfloor PRIVATE ${cf_json_SOURCE_DIR} ${CMAKE_CURRENT_BINARY_DIR})
 target_link_libraries(controlfloor PUBLIC ixwebsocket PkgConfig::CF_GST controlfloor_identity ${CF_SQLITE_TARGET})
