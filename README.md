@@ -1,7 +1,12 @@
-> **Experimental fork feature:** `-multi N` adds multiple screen-mirroring workers
-> behind one advertised receiver. See [MULTIDEVICE.md](MULTIDEVICE.md) for build/run
-> instructions, scope, architecture and verification status. Report issues with
-> this experimental feature to this fork, rather than upstream.
+> **Start here for this fork:** [MULTIDEVICE.md](MULTIDEVICE.md) is the guide to
+> multiple phones behind one receiver, including build/run instructions and
+> [local versus ControlFloor audio](MULTIDEVICE.md#audio-output-and-controlfloor-streaming).
+> For ControlFloor setup, pairing and client APIs, use
+> [controlfloor/README.md](controlfloor/README.md).
+>
+> **This README remains the upstream reference** for general UxPlay dependencies,
+> options and troubleshooting; it is not obsolete, but does not replace those
+> fork-specific guides. Report multidevice/ControlFloor issues to this fork.
 
 # UxPlay 1.74 (Experimental): AirPlay-Mirror and AirPlay-Audio server for Linux, macOS, and Unix (also runs on Windows).
 
@@ -1535,8 +1540,12 @@ device). The syntax of such options is specific to a given plugin (see
 GStreamer documentation), and some choices of audiosink might not work
 on your system.
 
-**-as 0** (or just **-a**) suppresses playing of streamed audio, but
-displays streamed video.
+**-as 0** (or just **-a**) disables the audio renderer and decoding while
+leaving video enabled. In this fork it also makes ControlFloor audio unavailable;
+it is not a local-speaker-only mute. To keep ControlFloor audio available without
+playing through the host speakers, use **-as fakesink**: decoding stays enabled
+and only the local output is discarded. See
+[the audio behavior table](MULTIDEVICE.md#audio-output-and-controlfloor-streaming).
 
 **-al *x*** specifies an audio latency *x* in (decimal) seconds in
 Audio-only (ALAC), that is reported to the client. Values in the range

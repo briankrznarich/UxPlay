@@ -1,5 +1,10 @@
 # Experimental multi-device receiver
 
+> **Guide for this fork:** use this page for multidevice operation and audio-output
+> behavior. The root [README](README.md) remains the general upstream reference.
+> The optional ControlFloor integration has its own
+> [build, pairing and API guide](controlfloor/README.md).
+
 This fork adds `-multi N`: one advertised receiver name, with an isolated UxPlay
 worker process for each connecting peer. It is an initial implementation for
 **simultaneous screen mirroring**, not a claim of tested 100-phone capacity.
@@ -8,11 +13,14 @@ Without `-multi`, UxPlay follows its normal single-device path.
 ## Build and run
 
 Use the normal UxPlay dependencies plus GIO >= 2.52 (part of GLib, commonly
-already installed with GStreamer). No additional downloaded C++ dependency is
-needed.
+already installed with GStreamer). The receiver-only build below disables the
+optional ControlFloor integration and needs no additional downloaded C++ dependency.
+On the `controlfloor` branch, ControlFloor is enabled at build time by default;
+use its [build instructions](controlfloor/README.md#build) for OCR, provider and
+pairing support.
 
 ```sh
-cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo
+cmake -S . -B build -DCMAKE_BUILD_TYPE=RelWithDebInfo -DENABLE_CONTROLFLOOR=OFF
 cmake --build build -j 6
 ./build/uxplay -multi 4 -n "Multi-device AirPlay" -nh -vsync no
 ```
@@ -36,9 +44,37 @@ Changing only the name is insufficient for the RAOP discovery record.
 To build without the new module:
 
 ```sh
-cmake -S . -B build/single -DENABLE_MULTIDEVICE=OFF
+cmake -S . -B build/single -DENABLE_MULTIDEVICE=OFF -DENABLE_CONTROLFLOOR=OFF
 cmake --build build/single -j 6
 ```
+
+## Audio output and ControlFloor streaming
+
+Audio decoding and local playback are enabled in each worker by default. All
+workers inherit the selected audio sink. Concurrent local playback requires a
+backend that supports sharing; an exclusive hardware sink may reject additional
+workers.
+
+| Launch option | Host speakers | ControlFloor audio, when provider mode is enabled |
+| --- | --- | --- |
+| Default (`-as autoaudiosink`) | Normal playback | Available on viewer request |
+| `-as fakesink` | Silent; local output discarded | Available on viewer request |
+| `-a` or `-as 0` | Disabled | Unavailable: audio decoding/renderer is disabled |
+
+**For remote audio without local speakers, use `-as fakesink`, not `-a` or
+`-as 0`.** The ControlFloor tap branches off decoded audio before the local
+volume/output stage. A fake sink discards only the local branch; disabling the
+renderer removes the source for both branches. These flags leave video enabled.
+This distinction also applies in single-device mode.
+
+In ControlFloor, the existing viewer speaker control sends `startAudio` and
+`stopAudio` to enable/disable remote forwarding for that device. It does not
+change local playback or pause the phone's media. `setAudioStreamConfiguration`
+selects PCM format, sample rate, channels and silence handling. Remote forwarding
+starts disabled and must be requested again after a provider reconnect. It is
+independent of JPEG forwarding and video ACKs. See
+[Audio forwarding](controlfloor/README.md#audio-forwarding) for formats, buffering
+and API details.
 
 ## Architecture and orchestration boundary
 
@@ -79,14 +115,12 @@ Proxied workers reject non-loopback connections to their control listener.
 Use the default GLib main context on one owning thread. Marshal events from
 other threads into that context. Event callbacks may inspect sessions or request
 an individual disconnect; defer stopping/destroying the supervisor until outside
-a callback. The current application callback logs events. No ControlFloor,
-keyboard orchestration, OCR or shortcut server is bundled in this fork.
-
-A later coordinator can consume these events and keep keyboard inventory,
-connection challenges and ControlFloor registration centrally, while adding a
-small worker command/snapshot interface. It does not need to take over AirPlay
-or pass all decoded frames through the parent. The process boundary is intended
-to contain the existing global renderer state, not to make sessions autonomous.
+a callback. The receiver-only application callback logs events. The optional
+ControlFloor integration adds keyboard orchestration, OCR and a shortcut server;
+see [LAN_PAIRING.md](controlfloor/LAN_PAIRING.md) for its coordinator and worker
+command interface. The coordinator keeps keyboard inventory and pairing state
+centrally without passing decoded media through the parent. The process boundary
+contains the existing global renderer state.
 
 **Identity:** routing currently uses the source IP address, plus IPv6 scope where
 applicable. IPv4-mapped IPv6 addresses are normalized. This assumes a controlled
@@ -134,9 +168,9 @@ No automatic reconnection of an iPhone's Screen Mirroring is attempted.
 - Audio is enabled by default in each worker, using upstream's audio decoder,
   timing and per-client volume controls. Concurrent phones play together through
   the host's audio output; there is no selected-phone audio policy yet. Use
-  `-as 0` (or `-a`) to mute all workers, or `-as <sink>` to choose their audio sink.
-  Concurrent playback requires an output backend that supports sharing; exclusive
-  hardware sinks may reject additional workers.
+  `-as fakesink` for silent local output with ControlFloor audio still available.
+  `-as 0` (or `-a`) disables audio decoding and both local and remote audio.
+  See [Audio output and ControlFloor streaming](#audio-output-and-controlfloor-streaming).
 - HLS URL playback (`-hls`), recording/dumps, cover-art/metadata/DACP file output,
   BLE advertisement files and the writable PIN registration list (`-reg`) are
   rejected in this mode. Ordinary single-device behavior is unaffected.
@@ -200,7 +234,11 @@ ctest --test-dir build/asan --output-on-failure
    in separate windows while each shows continuous motion.
 2. Play different audio on both phones. Verify both are audible and each phone's
    volume/pause affects only its own stream. Stop/restart mirroring on one phone
-   and rotate it; the other must keep playing. Repeat with `-as 0` to verify mute.
+   and rotate it; the other must keep playing. Repeat with `-as 0` to verify audio is disabled.
+   With ControlFloor enabled, repeat with `-as fakesink`: host speakers must stay
+   silent while the viewer can play audio. Toggle the viewer's speaker control
+   and confirm video continues; with the default sink, remote mute must leave
+   local playback audible.
 3. Disconnect one phone's network abruptly. Verify the other stream and eventual
    worker cleanup; then reconnect the first phone.
 4. Connect beyond the configured limit; existing streams must survive. After
@@ -216,7 +254,9 @@ until these hardware tests pass.
 ## Maintaining/reapplying the change
 
 Starting point: upstream-derived commit `fd88c0c` (UxPlay 1.73.6). Most new logic
-lives entirely in `multidevice/`; the existing renderers are unchanged.
+lives in `multidevice/`; the receiver-only feature leaves existing renderers
+unchanged. The optional ControlFloor integration additionally taps the video and
+audio renderers; keep those changes separate when maintaining the receiver core.
 
 The integration hooks to carry onto a newer upstream revision are:
 

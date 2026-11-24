@@ -344,8 +344,11 @@ sharing that writer with JPEGs so their payloads cannot interleave. Video ACK
 limits do not gate audio. This is live audio delivery without timestamp-based
 synchronization to the JPEG stream.
 
-Audio requires an enabled AirPlay audio renderer: do not use `-a` or `-as 0`.
-Use `-as fakesink` to suppress local speaker output while retaining remote audio.
+Audio requires an enabled AirPlay audio renderer. `-a` and `-as 0` disable that
+renderer and decoding, so they disable both local and ControlFloor audio.
+Use `-as fakesink` to keep decoding and remote forwarding available while
+discarding only the local speaker output. See the
+[audio behavior table](../MULTIDEVICE.md#audio-output-and-controlfloor-streaming).
 The existing GStreamer dependencies suffice; no additional audio library is
 needed. Only audio actually delivered by the phone can be forwarded.
 
