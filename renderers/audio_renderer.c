@@ -24,6 +24,9 @@
 #include <gst/gst.h>
 #include <gst/app/gstappsrc.h>
 #include "audio_renderer.h"
+#ifdef ENABLE_CONTROLFLOOR
+#include "../controlfloor/controlfloor.h"
+#endif
 #define SECOND_IN_NSECS 1000000000ULL
 
 #define NFORMATS 2     /* set to 4 to enable AAC_LD and PCM:  allowed, but  never seen in real-world use */
@@ -160,6 +163,9 @@ void audio_renderer_init(logger_t *render_logger, const char* audiosink, const b
         default:
             break;
         }
+#ifdef ENABLE_CONTROLFLOOR
+        if (cf_enabled()) g_string_append(launch, "tee name=cf_audio_tee ! queue ! ");
+#endif
         g_string_append (launch, "audioconvert ! ");
         g_string_append (launch, "audioresample quality=10 ! ");    /* maximum resampling quality for 44.1kHz -> 48kHz audio */
         g_string_append (launch, "volume name=volume ! ");
@@ -195,6 +201,12 @@ void audio_renderer_init(logger_t *render_logger, const char* audiosink, const b
             g_string_append (launch, "rtpL16pay ");
             g_string_append (launch, artp_pipeline);
         }
+#ifdef ENABLE_CONTROLFLOOR
+        if (cf_enabled()) g_string_append(launch,
+            " cf_audio_tee. ! queue leaky=downstream max-size-buffers=16 max-size-bytes=0 max-size-time=200000000 ! "
+            "audioconvert ! audioresample ! audio/x-raw,format=S16LE,rate=44100,channels=2,layout=interleaved ! "
+            "appsink name=cf_audio_capture sync=false async=false max-buffers=8 drop=true");
+#endif
         renderer_type[i]->pipeline  = gst_parse_launch(launch->str, &error);
 	if (error) {
           g_error ("gst_parse_launch error (audio %d):\n %s\n", i+1, error->message);
@@ -202,6 +214,9 @@ void audio_renderer_init(logger_t *render_logger, const char* audiosink, const b
         }
 
         g_assert (renderer_type[i]->pipeline);
+#ifdef ENABLE_CONTROLFLOOR
+        if (cf_enabled()) cf_attach_audio(renderer_type[i]->pipeline);
+#endif
         gst_pipeline_use_clock(GST_PIPELINE_CAST(renderer_type[i]->pipeline), clock);
         renderer_type[i]->bus = gst_element_get_bus(renderer_type[i]->pipeline);
         renderer_type[i]->appsrc = gst_bin_get_by_name (GST_BIN (renderer_type[i]->pipeline), "audio_source");
@@ -247,6 +262,9 @@ void audio_renderer_stop() {
         gst_app_src_end_of_stream(GST_APP_SRC(renderer->appsrc));
         gst_element_set_state (renderer->pipeline, GST_STATE_NULL);
         renderer = NULL;
+#ifdef ENABLE_CONTROLFLOOR
+        cf_audio_flush();
+#endif
     }
 }
 
@@ -293,6 +311,9 @@ void  audio_renderer_start(unsigned char *ct) {
         if(*ct != renderer->ct) {
             gst_app_src_end_of_stream(GST_APP_SRC(renderer->appsrc));
             gst_element_set_state (renderer->pipeline, GST_STATE_NULL);
+#ifdef ENABLE_CONTROLFLOOR
+            cf_audio_flush();
+#endif
             logger_log(logger, LOGGER_INFO, "changed audio connection, format %s", format[id]);
             renderer = renderer_type[id];
             gst_element_set_state (renderer->pipeline, GST_STATE_PLAYING);
@@ -390,6 +411,9 @@ void audio_renderer_set_volume(double volume) {
 }
 
 void audio_renderer_flush() {
+#ifdef ENABLE_CONTROLFLOOR
+    cf_audio_flush();
+#endif
 }
 
 void audio_renderer_destroy() {

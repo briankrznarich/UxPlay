@@ -1,6 +1,7 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "controlfloor.h"
 #include "mouse_input.h"
+#include "audio.h"
 #include "identity.h"
 #include "pairing.h"
 #include <sys/file.h>
@@ -63,6 +64,7 @@ std::atomic<unsigned long> captured{0}, encodeAttempts{0}, encodeFailures{0};
 int nativeWidth = 0, nativeHeight = 0;
 J settings;
 controlfloor::MouseInput mouseInput;
+controlfloor::AudioStream audioStream;
 std::unique_ptr<controlfloor::PairingCoordinator> coordinator;
 void (*pairingTransport)(const char *) = nullptr;
 std::mutex pairingMutex;
@@ -145,6 +147,11 @@ J encoderDiagnostics() {
 J snapshot() {
     std::lock_guard<std::mutex> l(stateMutex);
     J j = settings;
+    auto audio=audioStream.configuration();
+    j["audioEncoding"]=audio["encoding"]; j["audioSilence"]=audio["silence"];
+    j["audioEnabled"]=audioStream.enabled() ? 1 : 0;
+    j["supportedAudioEncodings"]=audio["supportedAudioEncodings"];
+    j["nativeAudioEncoding"]=audio["nativeAudioEncoding"];
     j["nativeWidthPortrait"] = std::min(nativeWidth, nativeHeight);
     j["nativeHeightPortrait"] = std::max(nativeWidth, nativeHeight);
     // Mouse geometry is independent of AirPlay/JPEG pixels. Without input, pixels remain provisional.
@@ -197,7 +204,7 @@ J capabilities() {
               {"initializationState", 0},
               {"keyboards", J::array()},
               {"video", true},
-              {"audio", false},
+              {"audio", bool(audioStream.available)},
               {"input", keyboard || consumer || (active && input.value("available", false))},
               {"textInputMethod", "bluetoothKeyboard"},
               {"nativeIOS", false}}}};
@@ -490,6 +497,19 @@ void mergeSettings(J &target, const J &patch, bool burst = false) {
         mergeSettings(target, patch["vidstream"], false);
     }
 }
+GstFlowReturn captureAudio(GstAppSink *sink, gpointer) {
+    GstSample *sample=gst_app_sink_pull_sample(sink);
+    if (!sample) return GST_FLOW_OK;
+    if (running && active && online && connected && audioStream.enabled()) {
+        GstMapInfo map;
+        GstBuffer *buffer=gst_sample_get_buffer(sample);
+        if (buffer && gst_buffer_map(buffer,&map,GST_MAP_READ)) {
+            audioStream.capture(map.data,map.size);
+            gst_buffer_unmap(buffer,&map);
+        }
+    }
+    gst_sample_unref(sample); return GST_FLOW_OK;
+}
 GstFlowReturn capture(GstAppSink *sink, gpointer) {
     const unsigned long revision = connectionRevision;
     GstSample *s = gst_app_sink_pull_sample(sink);
@@ -774,6 +794,7 @@ void network() {
             log("provider WebSocket transport open; awaiting ControlFloor commands");
         } else if (m->type == ix::WebSocketMessageType::Close || m->type == ix::WebSocketMessageType::Error) {
             online = false;
+            audioStream.stop();
             serverConfirmed = false;
             resetInput();
             if (m->type == ix::WebSocketMessageType::Close) {
@@ -810,6 +831,7 @@ void network() {
     });
     auto revokeProvider = [&] {
         active=false;
+        audioStream.stop();
         cfSocket.stop(); // Join old callbacks before changing the binding token.
         online=false; serverConfirmed=false;
         resetInput();
@@ -828,6 +850,7 @@ void network() {
         if (revision != observedConnection) {
             // Socket stop/join runs only here, never in the AirPlay callbacks.
             active = false;
+            audioStream.stop();
             cfSocket.stop();
             online = false;
             mouseInput.stop();
@@ -1087,9 +1110,16 @@ void network() {
                     invalidate(true);
                     flights.clear();
                     send(reply(request));
-                } else if (action == "getVideoStreamStatus")
+                } else if (action == "startAudio" || action == "setAudioStreamConfiguration") {
+                    audioStream.configure(args,action=="startAudio");
+                    send(reply(request));
+                } else if (action == "stopAudio") {
+                    audioStream.stop(); send(reply(request));
+                } else if (action == "getAudioStreamConfiguration")
+                    send(reply(request,audioStream.configuration()));
+                else if (action == "getVideoStreamStatus")
                     send(reply(request, {{"paused", 0},
-                                         {"audioEnabled", 0},
+                                         {"audioEnabled", audioStream.enabled() ? 1 : 0},
                                          {"enabled", forwarding ? 1 : 0},
                                          {"streaming", bool(forwarding && active)},
                                          {"videoEnabled", bool(forwarding)},
@@ -1100,6 +1130,7 @@ void network() {
                                          {"sourceGeneration", currentGeneration()},
                                          {"framesEncoded", encoded.load()},
                                          {"encoder", encoderDiagnostics()},
+                                         {"audio", audioStream.diagnostics()},
                                          {"framesSent", sent.load()},
                                          {"framesDropped", dropped.load()},
                                          {"inFlightFrames", flights.size()},
@@ -1129,7 +1160,7 @@ void network() {
                     }
                     if (request.contains("tag") || request.value("ack", J(0)) == 1)
                         send(reply(request));
-                } else if (action == "ack" || action == "stopAudio")
+                } else if (action == "ack")
                     send(reply(request));
                 else if (action == "getCFAgentCapabilities")
                     send(reply(request, capabilities()));
@@ -1148,6 +1179,21 @@ void network() {
             send(reply(screenshot, nullptr, "Timed out waiting for a decoded AirPlay frame"));
             screenshot = nullptr;
             screenshotDemand = false;
+        }
+        // Audio uses the same sole writer as JPEGs: header/payload pairs cannot
+        // interleave. It is independent of JPEG demand and the video ACK window.
+        controlfloor::AudioStream::Packet audio;
+        if (active && online && audioStream.take(audio)) {
+            J value={{"encoding",audio.encoding}};
+            J out=notice(audio.silenceBytes ? "AudioSilence" : "AudioFrame",value);
+            out["status"]="ok"; out["binaryLength"]=audio.bytes.size();
+            if (audio.silenceBytes) {
+                out["value"]["bytes"]=audio.silenceBytes;
+                out["value"]["durationMs"]=audio.durationMs;
+            }
+            send(out);
+            if (online && !audio.bytes.empty() && !cfSocket.sendBinary(audio.bytes).success) online=false;
+            if (cfSocket.bufferedAmount()>0) continue;
         }
         if (!active || (!forwarding && !screenshotDemand) || !online) {
             std::this_thread::sleep_for(std::chrono::milliseconds(5));
@@ -1374,6 +1420,7 @@ extern "C" int cf_start() {
 extern "C" void cf_stop() {
     std::lock_guard<std::mutex> shutdown(shutdownMutex);
     running = false;
+    audioStream.stop();
     identityGate.stop();
     if (encodeThread.joinable())
         encodeThread.join();
@@ -1391,6 +1438,7 @@ extern "C" void cf_client(const char *id, const char *name, const char *model) {
     if (!running) return;
     std::lock_guard<std::mutex> session(lifecycleMutex);
     active = false; connected = false;
+    audioStream.stop();
     ++connectionRevision;
     resetInput();
     invalidate();
@@ -1410,6 +1458,7 @@ extern "C" void cf_disconnected() {
     if (!running) return;
     std::lock_guard<std::mutex> session(lifecycleMutex);
     connected = false; active = false; ++connectionRevision;
+    audioStream.stop();
     resetInput(); invalidate(); identityGate.end(); dirty = true;
 }
 extern "C" void cf_attach(GstElement *pipeline) {
@@ -1422,6 +1471,16 @@ extern "C" void cf_attach(GstElement *pipeline) {
     cb.new_sample = capture;
     gst_app_sink_set_callbacks(GST_APP_SINK(sink), &cb, nullptr, nullptr);
     gst_object_unref(sink);
+}
+
+extern "C" void cf_audio_flush() { audioStream.flush(); }
+extern "C" void cf_attach_audio(GstElement *pipeline) {
+    if (!opt.enabled) return;
+    GstElement *sink=gst_bin_get_by_name(GST_BIN(pipeline),"cf_audio_capture");
+    if (!sink) return;
+    GstAppSinkCallbacks callbacks={}; callbacks.new_sample=captureAudio;
+    gst_app_sink_set_callbacks(GST_APP_SINK(sink),&callbacks,nullptr,nullptr);
+    gst_object_unref(sink); audioStream.available=true; dirty=true;
 }
 
 bool cf_lan_enabled() { return opt.lan; }

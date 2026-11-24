@@ -1,7 +1,7 @@
 # ControlFloor provider with OCR identification
 
 This branch combines the multi-device receiver with the existing ControlFloor
-JPEG and keyboard/mouse adapter. Each AirPlay worker keeps its normal local
+JPEG, PCM audio and keyboard/mouse adapter. Each AirPlay worker keeps its normal local
 video/audio playback and runs an independent identification gate. No ControlFloor
 phone connection is opened until that worker has read a keyboard marker and a
 confirmed About-page identity.
@@ -85,8 +85,9 @@ Add `--controlfloor-config FILE` if using a nondefault credential file. `-multi 
 advertises one receiver and permits four AirPlay peers. Omit `-multi` for a single
 receiver. Keep `-vsync no`: it was necessary for smooth playback on the development
 Mac. ControlFloor mode requires decoded mirroring video, not HLS, RTP forwarding,
-recording mode or disabled video. Local audio remains enabled; remote audio is
-not implemented.
+recording mode or disabled video. Local audio remains enabled; the viewer can
+independently enable remote audio with its existing speaker control. See
+[Audio forwarding](#audio-forwarding).
 
 For each phone:
 
@@ -298,8 +299,9 @@ Each identified worker logs in with the shared provider account and opens its ow
 `/provider/ws?udid=airplay-...` connection. It implements ping, device information,
 status, capabilities, orientation, video configuration/status/debug, start/stop
 video, screenshots, transport reset, frame ACKs and the input commands above.
-Unsupported native-iOS/CFAgent, multitouch and audio operations return explicit
-errors; `stopAudio` is harmless. Capability replies retain the nested envelope
+Unsupported native-iOS/CFAgent and multitouch operations return explicit
+errors. Audio uses the regular client’s `startAudio`, `stopAudio` and
+`setAudioStreamConfiguration` commands. Capability replies retain the nested envelope
 required by the existing frontend. No runner-status emulation is included.
 
 The existing JPEG sizing, quality, frame-rate/bandwidth, burst and configuration
@@ -307,6 +309,51 @@ validation behavior is preserved. JPEG headers and binary payloads share one
 network writer. ACK flow control uses a bounded two-frame window with recovery
 probes, rejects stale generation ACKs, and bounds the WebSocket output backlog.
 Slow clients cannot accumulate an unbounded history of frames.
+
+## Audio forwarding
+
+The existing ControlFloor speaker/playback control sends `startAudio` to unmute
+remote sound and `stopAudio` to mute it. Each worker starts muted and returns to
+muted after a provider disconnect; the server/viewer requests audio again after
+reconnecting. These commands do not pause the phone’s media or change the Mac’s
+local playback. Audio forwarding also works while JPEG forwarding is stopped.
+
+`startAudio` and `setAudioStreamConfiguration` accept:
+
+```json
+{"encoding":"PCM16-22050-1ch","silence":"drop"}
+```
+
+Supported encodings combine signed PCM16 or PCM8, 44100/22050/11025 Hz, and
+1ch/2ch. Defaults are PCM16-22050-1ch and `drop`. PCM16 is little-endian; stereo
+samples are interleaved. Empty or omitted fields retain their previous values.
+Invalid settings return an error without changing the current configuration.
+`setAudioStreamConfiguration` alone does not enable audio.
+
+Silence modes are `include`, `drop`, and `report`. After the first second of
+continuous all-zero input, `drop` suppresses silent packets; `report` instead
+emits periodic `AudioSilence` notices with encoding, byte count and duration.
+Sound resumes immediately when nonzero input returns. No audio ACK is required.
+
+The GStreamer tap copies decoded audio before the local volume element, using
+44.1 kHz stereo S16LE as its internal format. A leaky capture branch and a bounded
+200 ms PCM queue keep slow viewers from blocking AirPlay; packets older than
+250 ms are discarded. The provider’s single WebSocket writer converts PCM and
+sends each `AudioFrame` JSON header immediately followed by its binary payload,
+sharing that writer with JPEGs so their payloads cannot interleave. Video ACK
+limits do not gate audio. This is live audio delivery without timestamp-based
+synchronization to the JPEG stream.
+
+Audio requires an enabled AirPlay audio renderer: do not use `-a` or `-as 0`.
+Use `-as fakesink` to suppress local speaker output while retaining remote audio.
+The existing GStreamer dependencies suffice; no additional audio library is
+needed. Only audio actually delivered by the phone can be forwarded.
+
+`getVideoStreamStatus` reports `audioEnabled`; `getVideoStreamConfiguration`
+includes audio settings and supported formats. `getAudioStreamConfiguration`
+returns the audio settings directly, and `getVideoTransportDebug.audio` reports
+capture/drop counts and queue bounds. Capability replies advertise audio when
+the capture renderer is available.
 
 ## Automatic LAN pairing
 
@@ -366,6 +413,7 @@ python3 -m venv build/test-venv
 build/test-venv/bin/pip install aiohttp Pillow
 ctest --test-dir build/controlfloor --output-on-failure
 build/test-venv/bin/python controlfloor/tests/integration.py build/controlfloor/uxplay
+build/test-venv/bin/python controlfloor/tests/audio.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/mouse.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/keyboard.py build/controlfloor/uxplay
 build/test-venv/bin/python controlfloor/tests/navigation.py build/controlfloor/uxplay
@@ -386,7 +434,9 @@ build/controlfloor/controlfloor/controlfloor_ocr_harness --ocr-file about.png
 ```
 
 `CF_TEST_H264=1`, `CF_TEST_GL=1`, or `CF_TEST_STATIC=1` exercise alternate protocol
-test sources. `CF_TEST_GL=1` also exercises GPU-backed frame readback in the OCR
+test sources. `CF_TEST_AUDIO=1` adds a synthetic tone; `CF_TEST_AUDIO=silence`
+adds zero-valued PCM. The audio integration test exercises both, plus format
+changes, mute/resume, audio/JPEG framing and reconnects. `CF_TEST_GL=1` also exercises GPU-backed frame readback in the OCR
 harness on systems with GStreamer GL support. `--controlfloor-test-source` is an
 explicit test-only dummy identity path; it advertises no AirPlay listener and is
 rejected with `-multi`. Real AirPlay clients cannot use that bypass.

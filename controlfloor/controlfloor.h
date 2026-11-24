@@ -18,6 +18,9 @@ void cf_client(const char *identifier, const char *name, const char *model);
 void cf_disconnected(void);
 /* Attach the bounded decoded-frame tap to a renderer or synthetic pipeline. */
 void cf_attach(GstElement *pipeline);
+/* Bounded decoded PCM tap; start/stopAudio only affect remote forwarding. */
+void cf_attach_audio(GstElement *pipeline);
+void cf_audio_flush(void);
 #ifdef __cplusplus
 }
 #endif
