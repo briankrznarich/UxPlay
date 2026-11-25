@@ -219,9 +219,9 @@ async def main(binary, demo=False):
                 assert [b['key'] for _,a,b in startup if a=='typeSpecialKey']==['GoHome','GoHome','Enter']
                 assert startup[1][0]-startup[0][0]>=1, startup
                 assert startup[2][0]-startup[1][0]>=1, startup
-                assert startup[4][0]-startup[3][0]>=2, startup
+                assert startup[4][0]-startup[3][0]>=5, startup
                 assert startup[4][2]['text']==code
-                print('PASS real startup timings: Home, 1s, Home, 1s, Mouse 8, 2s, pairing code, Enter')
+                print('PASS real startup timings: Home, 1s, Home, 1s, Mouse 8, 5s, armed pairing code, Enter')
                 assert not bound['autoConnect']
                 mode='manual';calibration_release.clear();await control('mirror')
                 blocked=await until(lambda:matches(phase='calibration'))

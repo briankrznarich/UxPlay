@@ -172,15 +172,28 @@ J info() {
             {"logicalWidthPortrait", logicalWidth()},
             {"logicalHeightPortrait", logicalHeight()}};
 }
+// This provider only implements hardware input. Availability is a permanent
+// contract; helper/subscription failures are reported by individual commands.
+J inputCapabilities() {
+    return {{"tapTextCapable", 0}, {"tapTextInitialized", 0},
+            {"typingMethods", J::array({"hardwareKeyboard"})},
+            {"sendTextMethods", J::array({"hardwareKeyboard"})},
+            {"pointerMethods", J::array({"liveMouse"})},
+            {"activation", {{"liveMouse", {{"mode", "always"}}},
+                            {"hardwareKeyboard", {{"mode", "always"}}}}}};
+}
 J status() {
     std::lock_guard<std::mutex> l(stateMutex);
     return {{"providerStatus", "Connected"},
             {"providerStatusDetail", active ? "AirPlay provider" : "Waiting for AirPlay"},
             {"providerHostname", g_get_host_name()},
             {"videoSource", active ? "UxPlay" : "None"},
-            {"liveMouse", active && mouseState.value("available", false)},
+            {"liveMouse", true},
+            {"liveKeyboard", true},
+            {"inputCapabilities", inputCapabilities()},
+            {"mouseAvailable", active && mouseState.value("available", false)},
             {"mouse", mouseState.value("mouse", J::object())},
-            {"mouseEnabled", mouseState.value("enabled", false)},
+            {"mouseEnabled", true},
             {"keyboardAvailable", active && mouseState.value("keyboardAvailable", false)},
             {"consumerControlsAvailable", active && mouseState.value("consumerControlsAvailable", false)},
             {"mouseError", mouseState.value("error", std::string())},
@@ -196,11 +209,10 @@ J capabilities() {
     J input = inputState();
     bool keyboard = active && input.value("keyboardAvailable", false);
     bool consumer = active && input.value("consumerControlsAvailable", false);
-    // These compatibility flags mean tapText can be accepted immediately via
-    // Bluetooth. They do not claim a native CFAgent or on-screen-keyboard calibration.
+    // Accepting tapText as a legacy hardware alias is not on-screen tapText support.
     return {{"capabilities",
-             {{"tapTextCapable", keyboard ? 1 : 0},
-              {"tapTextInitialized", keyboard ? 1 : 0},
+             {{"tapTextCapable", 0},
+              {"tapTextInitialized", 0},
               {"initializationState", 0},
               {"keyboards", J::array()},
               {"video", true},

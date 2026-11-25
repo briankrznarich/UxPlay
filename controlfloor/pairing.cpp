@@ -192,6 +192,9 @@ struct PairingCoordinator::Impl {
     std::set<std::string> retiredWorkers;
     std::string artifact, mutationToken = uuid(), inventoryError;
     int64_t inventoryAt = 0;
+    // Coordinator-wide, monotonic and ephemeral. Only serving an actual pairing
+    // prompt to an unbound peer arms typing; inventory/UI/paired requests do not.
+    double lastPairingPromptAt = -1;
     KeyboardStore store;
     std::string source() const { return "iphone-use:" + opt.helper; }
     void save(Keyboard &k) {
@@ -540,6 +543,12 @@ struct PairingCoordinator::Impl {
             task(k,"startup-click","clickMouseButton",{{"button",8}});
         }
         if (k.phase == "prompt-delay" && now() >= k.due) {
+            if (lastPairingPromptAt < 0 || now()-lastPairingPromptAt > opt.pairingArmWindow) {
+                log(k,"pairing-code-skipped",{{"reason","No recent unpaired shortcut request"},
+                    {"armingWindowSeconds",opt.pairingArmWindow}});
+                fail(k,"Pairing not armed: no recent unpaired shortcut request; code not typed");
+                return;
+            }
             k.phase = "typing-token";
             task(k,"startup-type","typeText",{{"text",k.token}});
         }
@@ -662,12 +671,14 @@ struct PairingCoordinator::Impl {
         if (found!=bootstrap.end() && now()-found->second.at <= opt.retryDelay) {
             if (!found->second.fetched) {
                 found->second.fetched=true;
+                lastPairingPromptAt=now();
                 return response({{"command","initiate-pairing"},{"requestId",found->second.requestId}});
             }
             return response({{"command","ping"},{"requestId",""}});
         }
         if (bootstrap.size()>=512) return response({{"error","Too many unpaired callers"}},503);
         Bootstrap b; b.requestId=uuid(); b.at=now(); bootstrap[ip]=b;
+        lastPairingPromptAt=now();
         return response({{"command","initiate-pairing"},{"requestId",b.requestId}});
     }
     ix::HttpResponsePtr report(const std::string &ip, const J &value) {

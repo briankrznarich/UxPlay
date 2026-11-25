@@ -193,6 +193,18 @@ the iphone-use catalogs through the normal ControlFloor response envelopes. The
 frontend expresses ordinary taps/swipes through the live-mouse commands; native CFAgent tap/swipe and multitouch APIs are
 not emulated.
 
+`getDeviceStatus` and `DeviceStatus` notices advertise permanent `liveMouse: true`
+and `liveKeyboard: true`, with `inputCapabilities.pointerMethods: ["liveMouse"]`
+and `typingMethods`/`sendTextMethods: ["hardwareKeyboard"]`. Both methods have
+`activation: {mode: "always"}` entries. Clients must send down/move/up immediately
+for mouse and single-touch input, without calling `enableLiveMouse`. Extra touches
+are unsupported. Internal hardware failures return command errors; diagnostic
+`mouseAvailable` and `keyboardAvailable` fields do not change this contract.
+`enableLiveMouse` and `disableLiveMouse` remain compatibility release operations;
+neither gates subsequent input. Disconnects, cancellation and errors still release
+held buttons. Legacy `getCFAgentCapabilities` reports tapText capability and
+initialization as zero: `tapText` is accepted only as a hardware typing alias.
+
 Mouse `button` accepts integers 1–8, matching iphone-use's HID report: 1 is left,
 2 right, 3 middle, and 4–8 are additional buttons (including shortcut triggers).
 Button-only down/up calls preserve the pointer position.

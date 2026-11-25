@@ -80,7 +80,8 @@ async def main(binary):
                         await asyncio.sleep(.05)
                     raise AssertionError(status)
                 await readiness()
-                assert not (await s.command('getDeviceStatus'))['value']['liveMouse']
+                assert (await s.command('getDeviceStatus'))['value']['liveMouse']
+                assert not (await s.command('getDeviceStatus'))['value']['mouseAvailable']
                 for action in ('getKeyboardKeys','getKeyboardShortcuts'):
                     response=await s.command(action)
                     assert response['status']=='ok' and response['value']==dict(catalog,agent='Bluetooth')

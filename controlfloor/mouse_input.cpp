@@ -49,7 +49,7 @@ struct MouseInput::Impl {
     std::deque<Result> results;
     J published = {{"available", false},
                    {"keyboardAvailable", false},
-                   {"enabled", false},
+                   {"enabled", true},
                    {"logicalWidthPortrait", 375},
                    {"logicalHeightPortrait", 667},
                    {"mouse", J::object()},
@@ -79,7 +79,7 @@ struct MouseInput::Impl {
     }
     void run() {
         std::string host, error, calibration;
-        bool available = false, keyboardAvailable = false, consumerAvailable = false, enabled = false, held = false;
+        bool available = false, keyboardAvailable = false, consumerAvailable = false, held = false, releasePending = false;
         int width = 375, height = 667, calibratedWidth = 0, calibratedHeight = 0;
         J pendingGeometry;
         J mouse = J::object();
@@ -94,6 +94,7 @@ struct MouseInput::Impl {
                 } catch (...) {
                 } // Best effort after timeout/disconnect; retry on the next probe/reset.
             }
+            releasePending = held;
         };
         auto cancelCalibration = [&] {
             if (calibration.empty()) return;
@@ -120,7 +121,7 @@ struct MouseInput::Impl {
             }
             if (reset) {
                 cancelCalibration();
-                enabled = false;
+                releasePending = true;
                 release();
                 probeAt = Clock::time_point::min();
             }
@@ -155,7 +156,7 @@ struct MouseInput::Impl {
                                             std::find(reports.begin(), reports.end(), J(1)) != reports.end();
                     }
                     if (!available) {
-                        enabled = false;
+                        releasePending = true;
                         release();
                     }
                     mouse = hosts[0].value("mouse", J::object());
@@ -170,11 +171,12 @@ struct MouseInput::Impl {
                     height = static_cast<int>(std::max(w, h));
                     error = available ? "" : "Bluetooth mouse is not ready";
                     ++probeSequence;
-                    if (!enabled)
+                    if (releasePending)
                         release();
                 } catch (const std::exception &e) {
                     error = e.what();
-                    available = keyboardAvailable = consumerAvailable = enabled = false;
+                    available = keyboardAvailable = consumerAvailable = false;
+                    releasePending = true;
                     release();
                 }
                 probeAt = Clock::now() + std::chrono::seconds(1);
@@ -215,7 +217,7 @@ struct MouseInput::Impl {
                         result.value = call("/" + action);
                         result.value["agent"] = "Bluetooth";
                     } else if (action == "disableLiveMouse") {
-                        enabled = false;
+                        releasePending = true;
                         release();
                         if (held)
                             throw std::runtime_error("Could not confirm mouse release");
@@ -377,10 +379,11 @@ struct MouseInput::Impl {
                             release();
                             if (held)
                                 throw std::runtime_error("Could not confirm mouse release");
-                            enabled = true;
                         } else {
-                            if (!enabled && action != "mouseUp")
-                                throw std::runtime_error("Enable live mouse first");
+                            if (releasePending) {
+                                release();
+                                if (held) throw std::runtime_error("Could not confirm previous mouse release");
+                            }
                             J body = job.args;
                             // Selection and dimensions are provider-owned, never supplied by a viewer.
                             body["device"] = host;
@@ -395,14 +398,14 @@ struct MouseInput::Impl {
                         }
                     }
                     if (result.value.is_null())
-                        result.value = {{"mouse", mouse}, {"enabled", enabled}, {"bluetoothHost", host}};
+                        result.value = {{"mouse", mouse}, {"enabled", true}, {"bluetoothHost", host}};
                     if (MouseInput::handlesText(action)) {
                         result.value["charactersSubmitted"] = job.args.at("text").get<std::string>().size();
                         result.value["inputMethod"] = "bluetoothKeyboard";
                     }
                 } catch (const std::exception &e) {
                     result.error = e.what();
-                    enabled = false;
+                    releasePending = true;
                     release();
                 }
                 std::lock_guard<std::mutex> l(mutex);
@@ -416,7 +419,7 @@ struct MouseInput::Impl {
                     published = {{"probeSequence", probeSequence}, {"available", available},
                                  {"keyboardAvailable", keyboardAvailable},
                                  {"consumerControlsAvailable", consumerAvailable},
-                                 {"enabled", enabled},
+                                 {"enabled", true},
                                  {"bluetoothHost", host},
                                  {"logicalWidthPortrait", width},
                                  {"logicalHeightPortrait", height},
@@ -458,7 +461,7 @@ void MouseInput::stop() {
     impl->published["available"] = false;
     impl->published["keyboardAvailable"] = false;
     impl->published["consumerControlsAvailable"] = false;
-    impl->published["enabled"] = false;
+    impl->published["enabled"] = true;
 }
 void MouseInput::reset() {
     {
@@ -466,7 +469,7 @@ void MouseInput::reset() {
         ++impl->session;
         impl->jobs.clear();
         impl->results.clear();
-        impl->published["enabled"] = false;
+        impl->published["enabled"] = true;
     }
     impl->wake.notify_all();
 }
@@ -570,7 +573,7 @@ void MouseInput::submit(const Json &request, const Json &args) {
         ++impl->session;
         impl->jobs.clear();
         impl->results.clear();
-        impl->published["enabled"] = false;
+        impl->published["enabled"] = true;
         impl->wake.notify_all();
         throw std::runtime_error("Mouse queue full; cancelled input and releasing buttons");
     }

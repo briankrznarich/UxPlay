@@ -67,7 +67,7 @@ async def main(binary):
                 async def readiness():
                     for _ in range(80):
                         status=(await s.command('getDeviceStatus'))['value']
-                        if status['keyboardAvailable']==keyboard and status['consumerControlsAvailable']==consumer and status['liveMouse']==mouse_ready:return
+                        if status['keyboardAvailable']==keyboard and status['consumerControlsAvailable']==consumer and status['mouseAvailable']==mouse_ready:return
                         await asyncio.sleep(.05)
                     raise AssertionError(status)
                 async def ok(action,args=None):
@@ -112,7 +112,7 @@ async def main(binary):
                     sequence=calls[before:];assert sequence[0][0]=='mouseDown' and sequence[-1][0]=='mouseUp' and not held
                     assert value['inputMethod']=='bluetoothMouse'
                     if gesture.startswith('Page'):assert sequence[0][1]['x']==123 and sequence[0][1]['y']==321
-                assert not (await s.command('getDeviceStatus'))['value']['mouseEnabled']
+                assert (await s.command('getDeviceStatus'))['value']['mouseEnabled']
                 for action in ('centerSwipeUp','centerSwipeDown','centerSwipeLeft','centerSwipeRight',
                                'edgeSwipeUp','edgeSwipeDown','edgeSwipeLeft','edgeSwipeRight'):
                     await ok(action)

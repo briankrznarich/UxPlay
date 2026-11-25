@@ -74,17 +74,25 @@ async def main(binary):
                 async def availability(expected):
                     for _ in range(60):
                         response=(await s.command('getDeviceStatus'))['value']
-                        if response['liveMouse']==expected:return response
+                        assert response['liveMouse'] and response['liveKeyboard'] and response['mouseEnabled']
+                        if response['mouseAvailable']==expected:return response
                         await asyncio.sleep(.05)
                     raise AssertionError(response)
                 await availability(True)
                 info=(await s.command('getDeviceInformation'))['value']
                 assert (info['logicalWidthPortrait'],info['logicalHeightPortrait'])==(375,667),info
                 caps=(await s.command('getCFAgentCapabilities'))['value']['capabilities']
-                assert caps['input'] and not caps['nativeIOS'] and caps['tapTextCapable']==caps['tapTextInitialized']==1,caps
+                assert caps['input'] and not caps['nativeIOS'] and caps['tapTextCapable']==caps['tapTextInitialized']==0,caps
                 assert (await s.command('multiTouchGesture',{'paths':[]}))['status']=='error'
-                assert (await s.command('mouseDown',{'x':40,'y':50}))['status']=='error'
-                assert not calls
+                status=(await s.command('getDeviceStatus'))['value']
+                advertised=status['inputCapabilities']
+                assert advertised['typingMethods']==advertised['sendTextMethods']==['hardwareKeyboard']
+                assert advertised['pointerMethods']==['liveMouse']
+                assert all(v=={'mode':'always'} for v in advertised['activation'].values())
+                assert (await s.command('mouseDown',{'x':40,'y':50}))['status']=='ok'
+                assert held
+                assert (await s.command('mouseUp',{}))['status']=='ok'
+                calls.clear()
                 enabled=await s.command('enableLiveMouse')
                 assert enabled['status']=='ok' and enabled['value']['mouse']['profile']==mouse['profile'],enabled
                 assert not calls,'Enable must not calibrate, toggle AssistiveTouch, or send native-iOS commands'
@@ -140,7 +148,7 @@ async def main(binary):
                 print('PASS both text aliases, full US ASCII keymap, empty text, whole-call rejection of unmappable characters, helper errors')
                 if os.getenv('CF_SERVER_CHECKOUT'):
                     response=await s.command('getCFAgentCapabilities')
-                    check=await asyncio.create_subprocess_exec('node',str(pathlib.Path(__file__).with_name('frontend-capabilities.cjs')),os.environ['CF_SERVER_CHECKOUT'],'1',stdin=asyncio.subprocess.PIPE)
+                    check=await asyncio.create_subprocess_exec('node',str(pathlib.Path(__file__).with_name('frontend-capabilities.cjs')),os.environ['CF_SERVER_CHECKOUT'],'0',stdin=asyncio.subprocess.PIPE)
                     await check.communicate(json.dumps(response).encode());assert check.returncode==0
                 # Text waits for the helper's full call, not the two-second mouse timeout.
                 text_delay=2.3;entered.clear()
@@ -152,7 +160,7 @@ async def main(binary):
                 keyboard_ready=False
                 for _ in range(60):
                     caps=(await s.command('getCFAgentCapabilities'))['value']['capabilities']
-                    if caps['tapTextCapable']==0:break
+                    if not (await s.command('getDeviceStatus'))['value']['keyboardAvailable']:break
                     await asyncio.sleep(.05)
                 assert caps['tapTextCapable']==caps['tapTextInitialized']==0
                 assert (await s.command('typeText',{'text':'no keyboard'}))['status']=='error'
@@ -161,7 +169,7 @@ async def main(binary):
                 assert (await s.command('tapText',{'text':'keyboard-only input'}))['status']=='ok'
                 pointer_ready=True;await availability(True)
                 assert any(j.get('type')=='CFAgentCapabilities' and j['value']['capabilities']['tapTextCapable']==0 for j in s.notices)
-                assert any(j.get('type')=='CFAgentCapabilities' and j['value']['capabilities']['tapTextCapable']==1 for j in s.notices)
+                assert all(j['value']['capabilities']['tapTextCapable']==0 for j in s.notices if j.get('type')=='CFAgentCapabilities')
                 print('PASS long text timeout, responsive video/ACKs, keyboard-only readiness and capability updates')
                 await s.command('enableLiveMouse')
 
@@ -176,17 +184,17 @@ async def main(binary):
                 assert (await moving)['status']=='ok'
                 delay=0
                 await s.command('disableLiveMouse');assert not held
-                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='error'
-                print('PASS helper latency does not stall ping/video/ACKs; disable releases buttons and gates input')
+                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='ok'
+                print('PASS helper latency does not stall ping/video/ACKs; disable releases buttons without requiring re-enablement')
                 await s.command('enableLiveMouse');await s.command('mouseDown',{'x':80,'y':80})
                 fail=True
                 assert (await s.command('mouseMove',{'x':90,'y':90}))['status']=='error'
                 await until(lambda:not held);fail=False
-                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='error'
+                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='ok'
                 await s.command('enableLiveMouse');await s.command('mouseDown',{'x':80,'y':80})
                 assert (await s.command('mouseMove',{'x':'invalid','y':80}))['status']=='error'
                 await until(lambda:not held)
-                print('PASS HTTP and argument errors release held buttons; explicit re-enable required')
+                print('PASS HTTP and argument errors release held buttons; next drag needs no re-enable')
                 await s.command('enableLiveMouse');await s.command('mouseDown',{'x':80,'y':80})
                 delay=1.25;entered.clear()
                 moving=asyncio.create_task(s.command('mouseMove',{'x':90,'y':90}))
@@ -221,7 +229,7 @@ async def main(binary):
                 await s.command('enableLiveMouse');await s.command('mouseDown',{'x':80,'y':80})
                 await s.ws.close();await until(lambda:not held)
                 s=await asyncio.wait_for(sessions.get(),16)
-                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='error'
+                assert (await s.command('mouseDown',{'x':80,'y':80}))['status']=='ok'
                 await s.command('enableLiveMouse');await s.command('mouseDown',{'x':80,'y':80})
                 process.send_signal(signal.SIGTERM);await asyncio.wait_for(process.wait(),10);stopped=True
                 assert not held and process.returncode==0

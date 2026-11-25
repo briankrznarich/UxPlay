@@ -74,8 +74,15 @@ step verifies/selects a profile or generates one before ControlFloor admission.
    enabled gets a fresh pairing token such as `01-17-45-07` (four zero-padded
    `00`–`99` groups). The coordinator sends the HID Home key, waits one second,
    sends Home again, waits one second, then sends a button-only Mouse 8 click.
-   After Mouse 8 completes it waits two seconds for Shortcuts to launch and show
-   its prompt, types the token without any `X=` delimiters, then sends Enter.
+   After Mouse 8 completes it waits **five seconds** for Shortcuts to launch and
+   show its prompt. It types the token without any `X=` delimiters and sends Enter
+   **only if the server issued `initiate-pairing` to an unbound IP within the
+   preceding six seconds**. Otherwise it logs `pairing-code-skipped`, skips both
+   typing and Enter, and backs off for the normal 30-second automatic retry.
+   The arming timestamp is shared across all keyboards in the coordinator,
+   uses monotonic time and is not persisted. Requests from already-bound IPs,
+   health checks, HEAD requests, reports and `ping` replies do not refresh it.
+   Preparing a bootstrap command internally does not arm typing either.
    Delays begin after each input job completes and are cancellable coordinator
    states; they do not block other keyboards or video.
    Button-only clicks preserve the pointer position. The keyboard hardware ID is only the input
@@ -203,8 +210,11 @@ A ControlFloor WebSocket reconnect alone retains the physical binding and resets
 pending remote input. Use **Disconnect client** on an unpaired AirPlay row to
 explicitly stop that receiver; this action does not reset keyboard preferences.
 
-Automatic input is intentional: an unpaired keyboard may type the token into
-whatever UI currently has focus if its Mouse 8 binding/setup is wrong. Use the
+Before any unbound shortcut requests pairing, startup sends Home/Home/Mouse 8
+but never types a token or Enter. The short, global arming window reduces stray
+input during one-at-a-time setup. It does not identify which keyboard opened the
+prompt: if several keyboards are being configured, one unbound caller can arm
+token entry on all of them, including a keyboard with an incorrect Mouse 8 binding. Use the
 dashboard/logs to diagnose this. Turn auto-connect off for a keyboard before
 configuring its recording. New keyboards default to auto-connect ON.
 The server is intended for the trusted device LAN; it does not add authentication
@@ -293,7 +303,7 @@ and server restarts. Every event includes its pairing code for correlation.
 | Auto-connect ON | Start/retry discovery automatically when input is ready; new keyboards default ON. |
 | Auto-connect OFF | Stop the attempt/provider binding, cancel replay best-effort, preserve the AirPlay transport and remembered IP/identity, and allow manual actions. |
 | Mouse 8 | Send one atomic button-only click to this keyboard. Do not type a token or start the rest of pairing. |
-| Pair Keyboard | Pause background startup, send Home twice (one-second intervals), click Mouse 8, wait two seconds, then type a fresh token and Enter. **Stop after the callback binds the phone IP.** |
+| Pair Keyboard | Pause background startup, send Home twice (one-second intervals), click Mouse 8, wait five seconds, then type a fresh token and Enter only if an unbound shortcut armed pairing within the last six seconds. **Stop after the callback binds the phone IP.** |
 | Start Screen Mirroring | Reuse a connected same-IP AirPlay stream with Mouse 8 → About, or run replay if none exists; read fresh identity, calibrate the mouse, send Home and admit to ControlFloor. |
 | Resume auto-connect | Enable automatic startup again; if already at the manual paired stage, continue into mirroring. |
 | Reset & pause | Stop the attempt/provider binding, forget the saved IP and identity, clear the token, and turn auto-connect OFF. AirPlay remains in the unpaired list. |
@@ -359,6 +369,7 @@ With `BUILD_CONTROLFLOOR_TESTS=ON` and the existing test virtual environment:
 ```sh
 build/test-venv/bin/python controlfloor/tests/dashboard.py build/controlfloor/controlfloor/controlfloor_pairing_harness
 build/test-venv/bin/python controlfloor/tests/pairing.py build/controlfloor/controlfloor/controlfloor_pairing_harness
+build/test-venv/bin/python controlfloor/tests/pairing_arming.py build/controlfloor/controlfloor/controlfloor_pairing_harness
 build/test-venv/bin/python controlfloor/tests/lan_worker.py build/controlfloor/controlfloor/controlfloor_ocr_harness
 ctest --test-dir build/controlfloor --output-on-failure
 ```
