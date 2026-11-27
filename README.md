@@ -1547,6 +1547,12 @@ playing through the host speakers, use **-as fakesink**: decoding stays enabled
 and only the local output is discarded. See
 [the audio behavior table](MULTIDEVICE.md#audio-output-and-controlfloor-streaming).
 
+**-bind *IP|IFACE*** (this fork) selects a local IPv4 address/interface for
+AirPlay control/media, shortcut HTTP and Bonjour advertisement. Put
+`bind 192.168.1.13` in a startup file and select it with `-rc FILE`. See
+[LAN binding](MULTIDEVICE.md#choose-one-lan-addressinterface) for requirements
+and the corresponding shortcut URL.
+
 **--audio-delay-ms *N*** (this fork) adds 0–5000 milliseconds of decoded-audio
 delay, default 0, to local playback and ControlFloor forwarding for all workers.
 Works with `-vsync no`; video is unchanged. For example,

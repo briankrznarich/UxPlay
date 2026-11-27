@@ -42,6 +42,7 @@ int main(int argc, char **argv) {
     const char *capacity = g_getenv("UXPLAY_TEST_CAPACITY");
     options.max_devices = capacity ? (unsigned int) g_ascii_strtoull(capacity, NULL, 10) : 2;
     options.idle_seconds = 2;
+    if (const char *address=g_getenv("UXPLAY_TEST_BIND")) options.bind_address=address;
     for (int i = 1; i < argc; i++) options.arguments.push_back(argv[i]);
     GMainLoop *loop = g_main_loop_new(NULL, FALSE);
     multidevice::Supervisor supervisor(options, [](const multidevice::Event &event) {

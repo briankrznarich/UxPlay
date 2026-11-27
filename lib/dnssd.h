@@ -46,6 +46,7 @@ typedef struct dnssd_s {
     uint32_t features2;
 
     unsigned char pin_pw;
+    uint32_t interface_index; /* 0 = all interfaces; external DNS-SD backend. */
     void *dnssd_private;
   
 /* p2p support (macOS only) */

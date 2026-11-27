@@ -13,6 +13,8 @@ from aiohttp import ClientSession, web
 async def main(binary):
     inventory = ['keyboard-A']
     calls = []
+    timed_calls = []
+    typed_pending = False
     mode = 'silent'
     request = None
     typed = ''
@@ -28,10 +30,11 @@ async def main(binary):
                 consumerControls=True, liveMouse=True, mouse=dict(logicalWidth=375,
                 logicalHeight=667, down=False, capture=dict(state='idle', error=None))) for h in inventory]})
         async def input_request(r):
-            nonlocal request, typed
+            nonlocal request, typed, typed_pending
             body = await r.json()
             action = r.match_info['action']
             calls.append((action, body))
+            timed_calls.append((time.monotonic(),action,body))
             if action == 'mouseUp':
                 if mode == 'head':
                     await fetch('HEAD')
@@ -42,7 +45,9 @@ async def main(binary):
                     assert (await fetch())['command'] == 'ping'
             if action == 'type':
                 typed = body['text']
-            if action == 'typeSpecialKey' and body['key'] == 'Enter':
+                typed_pending = True
+            if action == 'typeSpecialKey' and body['key'] == 'Enter' and typed_pending:
+                typed_pending = False
                 assert mode == 'pair' and request and typed
                 async with http.post(base + '/shortcuts/report', json=dict(protocolVersion=2,
                     shortcutVersion='test', status='ok', **request, pairingId=typed,
@@ -66,7 +71,7 @@ async def main(binary):
                 headers={'X-UxPlay-Token': state['mutationToken']}) as response:
                 assert response.status == 202, await response.text()
         async def wait_phase(phase, host='keyboard-A', start=0):
-            deadline = time.monotonic() + 5
+            deadline = time.monotonic() + 12
             while time.monotonic() < deadline:
                 state = await snapshot()
                 for row in state['keyboards']:
@@ -77,7 +82,9 @@ async def main(binary):
         def no_token(start):
             sent = calls[start:]
             assert any(a == 'mouseUp' for a, _ in sent), sent
-            assert not any(a == 'type' or (a == 'typeSpecialKey' and b['key'] == 'Enter') for a, b in sent), sent
+            assert not any(a == 'type' for a, b in sent), sent
+            last_m8 = max(i for i,(a,_) in enumerate(sent) if a == 'mouseUp')
+            assert not any(a == 'typeSpecialKey' and b['key'] == 'Enter' for a,b in sent[last_m8+1:]), sent
         with tempfile.TemporaryDirectory(prefix='pairing-arming-') as directory:
             with open(pathlib.Path(directory) / 'harness.log', 'w+') as log:
                 try:
@@ -88,11 +95,19 @@ async def main(binary):
                         stdin=asyncio.subprocess.PIPE, stdout=asyncio.subprocess.PIPE, stderr=log)
                     first = json.loads(await asyncio.wait_for(process.stdout.readline(), 10))
                     base = f'http://127.0.0.1:{first["port"]}'
-                    row = await wait_phase('failed')
-                    assert 'not armed' in row['error'] and row['retryIn'] > 0
+                    deadline=time.monotonic()+25
+                    while sum(a=='mouseUp' for a,_ in calls)<3:
+                        assert time.monotonic()<deadline,calls
+                        await asyncio.sleep(.03)
                     no_token(0)
+                    assert [b['key'] if a=='typeSpecialKey' else a for a,b in calls]==[
+                        'mouseDown','mouseUp','GoHome','GoHome','Enter','mouseDown','mouseUp','mouseDown','mouseUp'],calls
+                    recovery=timed_calls[2:6]
+                    assert all(recovery[i+1][0]-recovery[i][0]>=.05 for i in range(3)),recovery
+                    clicks=[t for t,a,b in timed_calls if a=='mouseUp']
+                    assert clicks[1]-clicks[0]>=8 and clicks[2]-clicks[1]>=8,clicks
                     await control('settings', autoConnect=False)
-                    print('PASS no shortcut: Home/Home/M8, no typing or Enter, automatic retry scheduled')
+                    print('PASS alternating M8 / Home Home Enter M8 / M8; no code without arming; full retry waits')
                     mode = 'head'
                     start = len(calls)
                     await control('pair')
@@ -111,13 +126,22 @@ async def main(binary):
                     no_token(start)
                     print('PASS stale unpaired request and repeated ping do not arm typing')
                     await asyncio.sleep(2.1)  # Expire the mock's eight-second bootstrap lifetime.
-                    mode = 'pair'
+                    mode = 'silent'
                     start = len(calls)
                     await control('pair')
+                    await wait_phase('waiting-for-pairing-arm', start=start)
+                    no_token(start)
+                    mode = 'pair'
+                    request = await fetch()
+                    assert request['command']=='initiate-pairing'
+                    armed_at=time.monotonic()
                     row = await wait_phase('paired', start=start)
+                    typed_at=next(t for t,a,b in timed_calls[start:] if a=='type')
+                    assert typed_at-armed_at>=.09
+                    assert sum(a=='mouseUp' for a,b in calls[start:])==1
                     assert row['ip'] == '127.0.0.1' and row['bindingVerified']
                     assert typed == row['pairingCode']
-                    print('PASS fresh unbound request permits the token and Enter; callback binds IP')
+                    print('PASS late unbound request resumes existing attempt after prompt delay; callback binds IP')
                     # Keep a paired phone requesting commands throughout expiry of the
                     # global arming window. Then discover a new unconfigured keyboard.
                     for _ in range(32):
@@ -126,8 +150,8 @@ async def main(binary):
                     mode = 'bound'
                     start = len(calls)
                     inventory.append('keyboard-B')
-                    row = await wait_phase('failed', host='keyboard-B', start=start)
-                    assert 'not armed' in row['error']
+                    row = await wait_phase('waiting-for-pairing-arm', host='keyboard-B', start=start)
+                    assert row['phase']=='waiting-for-pairing-arm'
                     no_token(start)
                     print('PASS bound-phone requests cannot arm a newly discovered keyboard')
                 except BaseException:

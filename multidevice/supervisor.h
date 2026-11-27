@@ -25,6 +25,7 @@ struct Options {
     unsigned int idle_seconds = 30;
     unsigned short port = 0;
     bool ipv4_only = false;
+    std::string bind_address; // Empty preserves wildcard binding; otherwise IPv4.
 };
 
 // Use the default GLib main context on one thread for all methods/callbacks.

@@ -48,6 +48,41 @@ cmake -S . -B build/single -DENABLE_MULTIDEVICE=OFF -DENABLE_CONTROLFLOOR=OFF
 cmake --build build/single -j 6
 ```
 
+## Choose one LAN address/interface
+
+Use UxPlay's existing startup file format to restrict this fork to one IPv4 LAN:
+
+```text
+# uxplay-lan.conf (local, git-ignored)
+bind 192.168.1.13
+```
+
+Add `-rc uxplay-lan.conf` to your usual command, or specify `-bind 192.168.1.13`
+directly. Startup-file option names omit the leading hyphen. `bind en0` also works
+if that interface has exactly one active IPv4 address; specifying the IP is
+unambiguous. Command-line options override the file. The selected numeric address
+is passed to each worker, so workers cannot pick a different interface.
+
+This binds the AirPlay control listener, negotiated audio/video/timing sockets,
+and (in `--controlfloor-lan` mode) shortcut/admin HTTP listener to that address.
+Bonjour advertises both AirPlay services only on the interface that owns it.
+The supervisor's private worker-control connections remain on IPv4 loopback.
+Public IPv6 listening is disabled when `bind` is set. The setting requires
+macOS/Linux with the external Bonjour/Avahi backend (macOS default; on Linux build
+with `-DUSE_DNS_SD=1`). Internal mDNS and peer-to-peer/AWDL mode are rejected with
+this option. Without `bind`, existing wildcard behavior is unchanged.
+
+An unavailable address/interface is a startup error; the receiver never falls
+back to all interfaces. Reserve the LAN address in DHCP if you want it to remain
+stable. The admin page is now at `http://192.168.1.13:9876/`, including when opened
+on the host itself; `localhost:9876` and the USB address no longer reach it.
+
+**The phone's shortcut must also use `http://192.168.1.13:9876` as its server URL.**
+The bind setting cannot rewrite an installed shortcut or force a generic `.local`
+hostname to resolve to this address. Rebuild/reimport the LAN shortcut if its baked
+URL still uses the hostname or a USB address. Use the matching LAN admin URL for
+Install Shortcut. Existing Screen Mirroring sessions must reconnect after restart.
+
 ## Audio output and ControlFloor streaming
 
 Audio decoding and local playback are enabled in each worker by default. All

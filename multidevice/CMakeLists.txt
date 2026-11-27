@@ -7,6 +7,9 @@ option(BUILD_MULTIDEVICE_TESTS "Build multi-device transport integration tests" 
 if (BUILD_MULTIDEVICE_TESTS)
   enable_testing()
   find_package(Python3 REQUIRED COMPONENTS Interpreter)
+  add_executable(multidevice_bind_sockets tests/bind_sockets.c)
+  target_link_libraries(multidevice_bind_sockets airplay)
+  add_test(NAME multidevice_bind_sockets COMMAND multidevice_bind_sockets)
   add_executable(multidevice_test_harness tests/supervisor_harness.cpp)
   target_link_libraries(multidevice_test_harness uxplay_multidevice)
   add_test(NAME multidevice_transport COMMAND ${Python3_EXECUTABLE}

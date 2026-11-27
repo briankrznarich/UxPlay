@@ -8,6 +8,7 @@ namespace controlfloor {
 bool isShortcutRequest(const nlohmann::json &request);
 struct PairingOptions {
     std::string helper = "http://127.0.0.1:7390", directory = "log", artifact, database;
+    std::string listenAddress = "0.0.0.0";
     unsigned short port = 9876;
     double homeDelay = 1, promptDelay = 5, pairingArmWindow = 6, retryDelay = 30, timeout = 120;
 };

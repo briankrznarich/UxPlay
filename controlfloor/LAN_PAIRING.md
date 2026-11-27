@@ -4,6 +4,16 @@ This mode adds automatic keyboard → IPv4 → AirPlay → serial-number binding
 UxPlay's ControlFloor branch. It is opt-in; the existing manual marker/About OCR
 workflow remains available without `--controlfloor-lan`.
 
+## Restrict AirPlay and shortcuts to the same LAN
+
+The local `uxplay-lan.conf` contains `bind 192.168.1.13`. Add
+`-rc uxplay-lan.conf` to your normal launch command. Both AirPlay and shortcut/admin
+HTTP then listen on that LAN address, and Bonjour advertises on its interface.
+Open `http://192.168.1.13:9876/`; localhost and USB-interface URLs will no longer
+work. The installed LAN shortcut must have that same literal server URL baked in.
+See [network binding](../MULTIDEVICE.md#choose-one-lan-addressinterface) for
+interface-name selection, backend requirements and worker/media behavior.
+
 ## Requirements and first run
 
 - An **IPv4-only LAN**, one phone per source IPv4 address. Both the shortcut and
@@ -48,6 +58,10 @@ helper `http://127.0.0.1:7390`. Override the helper with
 `--controlfloor-shortcut-port N` overrides 9876; rebuild the shortcut's baked-in
 URL to match. `--controlfloor-shortcut-file FILE` is optional; when supplied,
 `GET /shortcuts/ControlFloorLAN.shortcut` downloads those exact signed bytes.
+The **Install Shortcut** link at the top of the keyboard dashboard opens this
+download on the same server address. For the local checkout, use
+`--controlfloor-shortcut-file ../cfa/shortcuts/build/ControlFloorLAN.shortcut`
+when launching from the UxPlay repository root.
 UxPlay does not compile or sign shortcuts.
 
 `--controlfloor-insecure` applies to the test ControlFloor server's certificate;
@@ -56,7 +70,8 @@ are unchanged. Do not run a legacy sole-phone provider against the same helper
 concurrently; file leases reject competing owners when they share a log directory.
 
 Before trying the phone, open `http://Brians-MacBook-Pro-2.local:9876/` for the
-keyboard dashboard. `curl http://127.0.0.1:9876/health` checks JSON health.
+keyboard dashboard. `curl http://192.168.1.13:9876/health` checks JSON health
+when using the LAN bind file (without `bind`, localhost also works).
 Test the root URL from the phone to check reachability without
 consuming a pairing command. **Do not use `/shortcuts/next` as a health check:**
 it fetches real work.
@@ -72,13 +87,23 @@ step verifies/selects a profile or generates one before ControlFloor admission.
 
 1. **Discover and trigger.** Every available, unpaired keyboard with auto-connect
    enabled gets a fresh pairing token such as `01-17-45-07` (four zero-padded
-   `00`–`99` groups). The coordinator sends the HID Home key, waits one second,
-   sends Home again, waits one second, then sends a button-only Mouse 8 click.
+   `00`–`99` groups). The first attempt sends **Mouse 8 only**, leaving the
+   current screen available for a human to configure its binding. Unsuccessful
+   attempts alternate per keyboard between **M8** and **Home → Home → Enter → M8**.
+   The recovery sequence waits one second after each Home and after the dismissal
+   Enter. This Enter closes an old Shortcuts popup that survives Home; it precedes
+   launching the new shortcut and is distinct from submitting a pairing code.
    After Mouse 8 completes it waits **five seconds** for Shortcuts to launch and
    show its prompt. It types the token without any `X=` delimiters and sends Enter
    **only if the server issued `initiate-pairing` to an unbound IP within the
-   preceding six seconds**. Otherwise it logs `pairing-code-skipped`, skips both
-   typing and Enter, and backs off for the normal 30-second automatic retry.
+   preceding six seconds**. If not armed, it waits without typing until
+   **30 seconds after M8 completed**, then logs `pairing-code-skipped` and starts
+   the alternate attempt (with auto-connect enabled). There is no extra 30-second
+   backoff after that wait. A fresh arming request during the wait resumes this
+   attempt after giving its prompt five seconds to open; the recovery keys are
+   not sent. Resetting a keyboard or successfully binding its IP resets the next
+   attempt to M8-only. Manual Pair Keyboard uses the same alternating sequence
+   and arming gate, but does not automatically retry when auto-connect is paused.
    The arming timestamp is shared across all keyboards in the coordinator,
    uses monotonic time and is not persisted. Requests from already-bound IPs,
    health checks, HEAD requests, reports and `ping` replies do not refresh it.
@@ -190,8 +215,9 @@ and is never copied through this coordinator.
 
 ## Timeouts, disconnects and logs
 
-Initial callbacks have a 30-second window. Failed attempts back off for 30
-seconds before another Mouse 8/type/Enter sequence, using a new token. Pairing
+An unarmed startup waits 30 seconds after M8 before its alternate attempt.
+Other failed attempts back off for 30 seconds before retrying with a new token.
+A late arming request is allowed time to display its prompt before token entry. Pairing
 stages after the initial callback have a 120-second deadline. UI timing and these
 values currently live in `PairingOptions` (`pairing.h`); tests shorten them.
 
@@ -210,8 +236,9 @@ A ControlFloor WebSocket reconnect alone retains the physical binding and resets
 pending remote input. Use **Disconnect client** on an unpaired AirPlay row to
 explicitly stop that receiver; this action does not reset keyboard preferences.
 
-Before any unbound shortcut requests pairing, startup sends Home/Home/Mouse 8
-but never types a token or Enter. The short, global arming window reduces stray
+Before any unbound shortcut requests pairing, startup alternates M8-only and
+Home/Home/Enter/M8 recovery without typing a token. The recovery Enter is
+intentional even while unarmed, to dismiss an old popup. The short, global arming window reduces stray
 input during one-at-a-time setup. It does not identify which keyboard opened the
 prompt: if several keyboards are being configured, one unbound caller can arm
 token entry on all of them, including a keyboard with an incorrect Mouse 8 binding. Use the
@@ -266,7 +293,8 @@ packet-capture logs. This log covers the LAN web server, not AirPlay RTSP traffi
 ## Keyboard dashboard and saved state
 
 The dashboard is served by the same listener at `/` (by default,
-`http://Brians-MacBook-Pro-2.local:9876/` or `http://127.0.0.1:9876/`). No separate
+`http://192.168.1.13:9876/` with the LAN bind file, or
+`http://127.0.0.1:9876/` with the default wildcard listener). No separate
 web server, JavaScript packages, CDN, or asset directory is required. The HTML
 is embedded at build time. Both inventory and browser snapshots poll about once
 a second. Search matches hardware ID, friendly label, IP and device identity.
@@ -303,7 +331,7 @@ and server restarts. Every event includes its pairing code for correlation.
 | Auto-connect ON | Start/retry discovery automatically when input is ready; new keyboards default ON. |
 | Auto-connect OFF | Stop the attempt/provider binding, cancel replay best-effort, preserve the AirPlay transport and remembered IP/identity, and allow manual actions. |
 | Mouse 8 | Send one atomic button-only click to this keyboard. Do not type a token or start the rest of pairing. |
-| Pair Keyboard | Pause background startup, send Home twice (one-second intervals), click Mouse 8, wait five seconds, then type a fresh token and Enter only if an unbound shortcut armed pairing within the last six seconds. **Stop after the callback binds the phone IP.** |
+| Pair Keyboard | Pause background startup; first try M8 only, alternating with Home/Home/Enter/M8 recovery on subsequent attempts. Wait five seconds and type a fresh token plus Enter only when armed by an unbound shortcut within six seconds; otherwise wait up to 30 seconds after M8. **Stop after the callback binds the phone IP.** |
 | Start Screen Mirroring | Reuse a connected same-IP AirPlay stream with Mouse 8 → About, or run replay if none exists; read fresh identity, calibrate the mouse, send Home and admit to ControlFloor. |
 | Resume auto-connect | Enable automatic startup again; if already at the manual paired stage, continue into mirroring. |
 | Reset & pause | Stop the attempt/provider binding, forget the saved IP and identity, clear the token, and turn auto-connect OFF. AirPlay remains in the unpaired list. |
@@ -370,6 +398,8 @@ With `BUILD_CONTROLFLOOR_TESTS=ON` and the existing test virtual environment:
 build/test-venv/bin/python controlfloor/tests/dashboard.py build/controlfloor/controlfloor/controlfloor_pairing_harness
 build/test-venv/bin/python controlfloor/tests/pairing.py build/controlfloor/controlfloor/controlfloor_pairing_harness
 build/test-venv/bin/python controlfloor/tests/pairing_arming.py build/controlfloor/controlfloor/controlfloor_pairing_harness
+# Optional real listener/Bonjour test on your LAN (isolated ports/name, no phone input):
+build/test-venv/bin/python controlfloor/tests/network_binding.py build/controlfloor/uxplay 192.168.1.13 en0
 build/test-venv/bin/python controlfloor/tests/lan_worker.py build/controlfloor/controlfloor/controlfloor_ocr_harness
 ctest --test-dir build/controlfloor --output-on-failure
 ```

@@ -9,7 +9,7 @@ from calibration_client import complete_calibration
 
 async def main(binary):
     calls=[]; host='keyboard-A'; phone_ip='127.0.0.1'; inventory=[host,'keyboard-B']
-    capture='idle'; token=''; pairing_request=None; about_request=None
+    capture='idle'; token=''; typed_pending=False; pairing_request=None; about_request=None
     worker='receiver-1'; connection=1; connected=False; ready=False; allow_about=False; admitted=False
     outputs=[]; tasks=[]; auto_replay=True; auto_about=True; fail_replay=False
     recording_b=True
@@ -41,7 +41,7 @@ async def main(binary):
         return web.json_response({'bluetoothHosts':[{'bluetoothHost':h,'keyboard':True,'consumerControls':True,'liveMouse':True,
             'mouse':{'logicalWidth':375,'logicalHeight':667,'down':False,'capture':{'state':'recording' if h=='keyboard-B' and recording_b else capture,'error':None}}} for h in inventory]})
     async def post(r):
-        nonlocal token,capture
+        nonlocal token,capture,typed_pending
         body=await r.json();action=r.match_info['action'];calls.append((action,body))
         if body['device'] not in inventory:
             return web.json_response({'error':'Bluetooth host disconnected'},status=503)
@@ -64,10 +64,14 @@ async def main(binary):
                     tasks.append(asyncio.create_task(remote_shortcut()))
             return web.json_response({'mouse':{'down':action=='mouseDown'}})
         if action=='type':
+            typed_pending=True
             token=body['text'];assert re.fullmatch(r'[0-9]{2}(?:-[0-9]{2}){3}',token),token
         elif action=='typeSpecialKey':
             key=body['key']
-            if key=='Enter':
+            if key=='Enter' and not typed_pending:
+                pass # Recovery popup dismissal.
+            elif key=='Enter':
+                typed_pending=False
                 assert pairing_request and token
                 # Invalid spellings must not bind or consume this request.
                 for invalid in ('X='+token+'=X', token.replace('-',''), token.replace('-',':'), 12345678):
@@ -78,7 +82,7 @@ async def main(binary):
                 capture='replaying'
                 if auto_replay:tasks.append(asyncio.create_task(replay()))
                 return web.json_response({'capture':{'state':'replaying','durationMs':400}})
-            elif key=='GoHome':pass # Startup sends Home twice; final Home follows OCR.
+            elif key=='GoHome':pass # Recovery sends Home twice; final Home follows OCR.
             elif key=='endCapture':capture='idle'
             elif key=='Backspace':pass
             else:raise AssertionError(body)
@@ -121,12 +125,12 @@ async def main(binary):
                 recording_b=False
                 await until(lambda:any(action=='type' and body['device']=='keyboard-B' for action,body in calls))
                 inventory.remove('keyboard-B')
-                assert [body['key'] for action,body in calls if action=='typeSpecialKey' and body['device']==host]==['GoHome','GoHome','Enter','replayCapture']
+                assert [body['key'] for action,body in calls if action=='typeSpecialKey' and body['device']==host]==['Enter','replayCapture']
                 assert sum(action=='mouseUp' and body['device']==host for action,body in calls)==1,'Coordinator must not double-trigger replay final Mouse 8'
                 assert (await report(pairing_request,pairingId=token,model='iPhone SE',iosVersion='26.6'))[1]['duplicate']
                 code,_=await report(dict(command='prefs-general-about',requestId='stale'));assert code==409
                 ready=True;await until(lambda:admitted)
-                assert sum(action=='typeSpecialKey' and body['key']=='GoHome' and body['device']==host for action,body in calls)==3
+                assert sum(action=='typeSpecialKey' and body['key']=='GoHome' and body['device']==host for action,body in calls)==1
                 assert (await fetch())=={'command':'ping','requestId':''}
                 print('PASS startup token callback, IP binding, asynchronous replay + final shortcut fetch, About gate, Home before admission')
                 req={'action':'typeSpecialKey','args':{'key':'Backspace'},'tag':'remote-1','cf':{'d':'airplay-TEST23456789'}}

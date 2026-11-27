@@ -1495,6 +1495,8 @@ extern "C" void cf_attach_audio(GstElement *pipeline) {
     gst_object_unref(sink); audioStream.available=true; dirty=true;
 }
 
+extern "C" void cf_set_listen_address(const char *address) { opt.pairing.listenAddress=address; }
+
 bool cf_lan_enabled() { return opt.lan; }
 bool cf_lan_start() {
     if (!opt.lan) return true;

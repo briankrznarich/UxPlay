@@ -157,6 +157,12 @@ are dynamically assigned. See MULTIDEVICE.md.
 .TP
 \fB\-as\fR 0     (or \fB\-a\fR) Turn audio off, streamed video only.
 .TP
+\fB\-bind\fR IP|IFACE  Restrict IPv4 AirPlay/media/shortcut listeners and
+Bonjour advertisement to one local address/interface. Workers retain private
+loopback control. Requires external Bonjour/Avahi on macOS/Linux; incompatible
+with peer-to-peer discovery. A missing address fails startup. In a -rc startup
+file write "bind 192.168.1.13". Installed shortcuts must use the matching LAN URL.
+.TP
 \fB\-\-audio-delay-ms\fR N  Add 0..5000 ms of decoded-audio delay (default 0).
 Applies to local playback and ControlFloor forwarding in every worker, including
 with -vsync no. Video is unchanged. Uses a bounded sample buffer, cleared on

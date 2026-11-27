@@ -380,7 +380,9 @@ the capture renderer is available.
 
 ## Automatic LAN pairing
 
-The LAN listener also serves a keyboard dashboard at `http://127.0.0.1:9876/`.
+The LAN listener also serves a keyboard dashboard at `http://127.0.0.1:9876/`
+by default. With `-rc uxplay-lan.conf` selecting `bind 192.168.1.13`, use
+`http://192.168.1.13:9876/` instead. See [LAN binding](../MULTIDEVICE.md#choose-one-lan-addressinterface).
 Its compact table lists known keyboards, pairing stages and live connection state, with manual
 Mouse 8, Pair Keyboard, Start Screen Mirroring, Reset & pause and auto-connect
 controls. Selecting an action executes it immediately; options/events expand under

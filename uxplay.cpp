@@ -58,6 +58,8 @@
 #include <sys/utsname.h>
 #include <sys/socket.h>
 #include <ifaddrs.h>
+#include <net/if.h>
+#include <arpa/inet.h>
 #include <sys/types.h>
 #include <pwd.h>
 # ifdef __linux__
@@ -71,6 +73,9 @@
 #endif
 
 #include "lib/raop.h"
+extern "C" {
+#include "lib/netutils.h"
+}
 #include "lib/stream.h"
 #include "lib/logger.h"
 #include "lib/crypto.h"
@@ -112,6 +117,8 @@ static bool server_name_is_utf8 = false;
 static dnssd_t *dnssd = NULL;
 static raop_t *raop = NULL;
 static logger_t *render_logger = NULL;
+static std::string bind_target, bind_address;
+static unsigned bind_interface_index = 0;
 static bool audio_sync = false;
 static bool video_sync = true;
 static unsigned audio_output_delay_ms = 0;
@@ -1224,6 +1231,7 @@ static void print_info (char *name) {
     printf("          audio packets are dumped. \"aud\"= unknown format.\n");
     printf("-v        Displays version information\n");
     printf("-h        Displays this help\n");
+    printf("-bind IP|IFACE  Bind IPv4 AirPlay/media/shortcut sockets and Bonjour to one local interface\n");
     printf("-rc fn    Read startup options from file \"fn\" instead of ~/.uxplayrc, etc\n");
     printf("Startup options in $UXPLAYRC, ~/.uxplayrc, or ~/.config/uxplayrc are\n");
     printf("applied first (command-line options may modify them): format is one \n");
@@ -1610,6 +1618,11 @@ static void parse_arguments (int argc, char *argv[]) {
             fprintf(stderr, "This build does not include multi-device support\n");
             exit(1);
 #endif
+        } else if (arg == "-bind") {
+            if (i + 1 >= argc || !argv[i+1][0] || argv[i+1][0] == '-') {
+                fprintf(stderr, "-bind requires a local IPv4 address or interface name\n"); exit(1);
+            }
+            bind_target = argv[++i];
         } else if (arg == "-rc") {
             i++;  //specifies startup file: has already been processed
         } else if (arg == "-allow") {
@@ -2504,6 +2517,7 @@ static int start_dnssd(std::vector<char> hw_addr, std::string name) {
         return 1;
     }
 
+    dnssd->interface_index = bind_interface_index;
 #if defined(__APPLE__) && defined(UXPLAY_HAVE_APPLE_P2P)
     /* support for p2p (macOS only) */
     dnssd_set_peer_to_peer(dnssd, (int) peer_to_peer);
@@ -3349,11 +3363,13 @@ static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_a
     options.ipv4_only = cf_lan_enabled();
 #endif
     options.port = tcp[1];
+    options.bind_address = bind_address;
     for (int i = 0; i < argc; i++) options.arguments.push_back(argv[i]);
     // Resolve identity once, including random MAC and hostname suffix. All
     // workers answer for the same advertised receiver and pairing public key.
     options.arguments.insert(options.arguments.end(),
         {"-n", server_name, "-nh", "-m", mac_address});
+    if (!bind_address.empty()) options.arguments.insert(options.arguments.end(), {"-bind",bind_address});
     multidevice::Supervisor supervisor(options, [](const multidevice::Event &event) {
 #ifdef ENABLE_CONTROLFLOOR
         if (auto coordinator = cf_lan_coordinator())
@@ -3428,6 +3444,51 @@ static int run_multidevice(int argc, char *argv[], const std::vector<char> &hw_a
 }
 #endif
 
+// Resolve once in the parent, then pass the numeric address to every worker.
+// Binding must fail closed: never fall back to another interface if it disappears.
+static void configure_bind_address() {
+    if (bind_target.empty()) return;
+#if defined(_WIN32) || !defined(EXTERNAL_DNS_SD)
+    fprintf(stderr, "-bind currently requires macOS/Linux with external Bonjour/Avahi DNS-SD (build with -DUSE_DNS_SD=1)\n");
+    exit(1);
+#else
+#if defined(__APPLE__) && defined(UXPLAY_HAVE_APPLE_P2P)
+    if (peer_to_peer) {
+        fprintf(stderr, "-bind cannot be combined with peer-to-peer/AWDL discovery\n"); exit(1);
+    }
+#endif
+    struct ifaddrs *interfaces = nullptr;
+    if (getifaddrs(&interfaces)) { perror("getifaddrs"); exit(1); }
+    std::string interface_name;
+    for (auto item=interfaces; item; item=item->ifa_next) {
+        if (!item->ifa_addr || item->ifa_addr->sa_family!=AF_INET || !(item->ifa_flags & IFF_UP)) continue;
+        char address[INET_ADDRSTRLEN];
+        auto ipv4=reinterpret_cast<struct sockaddr_in *>(item->ifa_addr);
+        if (!inet_ntop(AF_INET,&ipv4->sin_addr,address,sizeof(address))) continue;
+        if (bind_target!=address && bind_target!=item->ifa_name) continue;
+        if (!bind_address.empty() && bind_address!=address) {
+            freeifaddrs(interfaces);
+            fprintf(stderr,"Interface has multiple IPv4 addresses; specify an IP with -bind\n"); exit(1);
+        }
+        bind_address=address; interface_name=item->ifa_name;
+    }
+    freeifaddrs(interfaces);
+    bind_interface_index=interface_name.empty() ? 0 : if_nametoindex(interface_name.c_str());
+    if (bind_address.empty() || !bind_interface_index) {
+        fprintf(stderr,"-bind %s is not an IPv4 address/interface on this host that is up\n",bind_target.c_str()); exit(1);
+    }
+    bool worker=false;
+#ifdef ENABLE_MULTIDEVICE
+    worker=multidevice::worker_enabled();
+#endif
+    if (netutils_set_bind_address(bind_address.c_str(),worker)) exit(1);
+#ifdef ENABLE_CONTROLFLOOR
+    cf_set_listen_address(bind_address.c_str());
+#endif
+    LOGI("Network restricted to %s on %s (interface %u); IPv4 only",bind_address.c_str(),interface_name.c_str(),bind_interface_index);
+#endif
+}
+
 static void read_config_file(const char * filename, const char * uxplay_name) {
     std::string config_file = filename;
     std::string option_char = "-";
@@ -3438,7 +3499,7 @@ static void read_config_file(const char * filename, const char * uxplay_name) {
         fprintf(stdout,"UxPlay: reading configuration from  %s\n", config_file.c_str());
         std::string line;
         while (std::getline(file, line)) {
-            if (line[0] == '#') continue;
+            if (line.empty() || line[0] == '#') continue;
             //  first process line into separate option items with '\0' as delimiter
             bool is_part_of_item, in_quotes;
             char endchar;
@@ -3604,6 +3665,7 @@ int main (int argc, char *argv[]) {
         read_config_file(config_file.c_str(), argv[0]);
     }
     parse_arguments (argc, argv);
+    configure_bind_address();
 #ifdef ENABLE_CONTROLFLOOR
     if (cf_lan_enabled()) {
 #ifdef ENABLE_MULTIDEVICE

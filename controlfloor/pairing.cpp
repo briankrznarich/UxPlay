@@ -1,5 +1,6 @@
 // SPDX-License-Identifier: GPL-3.0-or-later
 #include "pairing.h"
+#include <cmath>
 #include "mouse_input.h"
 #include "keyboard_store.h"
 #include "dashboard_asset.h"
@@ -165,8 +166,9 @@ struct PairingCoordinator::Impl {
         int64_t lastSeen = 0;
         double savedAt = 0;
         bool replayRequested = false, calibrationForAdmission = false;
+        bool recoveryNext = false;
         bool present = false, initialReport = false, fetched = false, reported = false, replayDone = false;
-        double due = 0, deadline = 0, started = 0;
+        double due = 0, deadline = 0, started = 0, armDeadline = 0;
         unsigned long replayProbe = 0;
         J metadata, identity, commandInput, remoteShortcut, remoteReport;
         std::map<std::string,Work> work;
@@ -326,11 +328,19 @@ struct PairingCoordinator::Impl {
             Bootstrap request; request.requestId=uuid(); request.at=k.started; request.fetched=false;
             bootstrap[k.lastIP]=request;
         }
-        k.phase = "going-home-for-pairing"; k.initialReport = k.fetched = k.reported = k.replayDone = false;
+        bool recovery=k.recoveryNext; k.recoveryNext=!recovery;
+        k.phase = recovery ? "going-home-for-pairing" : "starting";
+        k.initialReport = k.fetched = k.reported = k.replayDone = false;
         k.ip.clear(); k.worker.clear(); k.error.clear(); k.identity = J::object();
-        k.deadline = now()+opt.retryDelay; log(k,"startup",{{"log",keyboardLogPath(k)}});
-        k.operation="Sending first Home key";
-        task(k,"startup-home-first","simulateHomeButton");
+        k.deadline = now()+opt.retryDelay;
+        log(k,"startup",{{"log",keyboardLogPath(k)}, {"sequence",recovery ? "home-home-enter-m8" : "m8"}});
+        if (recovery) {
+            k.operation="Recovery: sending first Home key";
+            task(k,"startup-home-first","simulateHomeButton");
+        } else {
+            k.operation="Opening shortcut with Mouse 8 (no Home keys)";
+            task(k,"startup-click","clickMouseButton",{{"button",8}});
+        }
     }
     void completed(Keyboard &k, MouseInput::Result &r) {
         std::string id = r.request.value("_pairingTask", "");
@@ -378,10 +388,15 @@ struct PairingCoordinator::Impl {
             k.phase="home-key-delay"; k.due=now()+opt.homeDelay;
             k.operation="Waiting before second Home key"; log(k,"startup-home",{{"press",1}});
         } else if (work.operation == "startup-home-second") {
+            k.phase="recovery-dismiss-delay"; k.due=now()+opt.homeDelay;
+            k.operation="Waiting before dismissing old shortcut prompt"; log(k,"startup-home",{{"press",2}});
+        } else if (work.operation == "startup-dismiss") {
             k.phase="shortcut-launch-delay"; k.due=now()+opt.homeDelay;
-            k.operation="Waiting before Mouse 8"; log(k,"startup-home",{{"press",2}});
+            k.operation="Waiting before Mouse 8"; log(k,"startup-dismissed-prompt");
         } else if (work.operation == "startup-click") {
             k.phase = "prompt-delay"; k.due = now()+opt.promptDelay;
+            k.armDeadline=now()+opt.retryDelay;
+            k.deadline=k.armDeadline+opt.promptDelay+1;
             k.operation="Waiting for shortcut prompt";
         }
         else if (work.operation == "startup-type") task(k,"startup-enter","typeSpecialKey",{{"key","Enter"}});
@@ -486,6 +501,7 @@ struct PairingCoordinator::Impl {
         if (!oldIP.empty()) bootstrap.erase(oldIP);
         if (!k.lastIP.empty()) bootstrap.erase(k.lastIP);
         k.phase="idle"; k.autoConnect=false; k.manualHold=true; k.pendingManual.clear();
+        k.recoveryNext=false;
         k.token.clear(); k.error.clear(); k.initialReport=false; k.identity=J::object();
         k.operation=forget ? "Binding forgotten; auto-connect paused" : "Auto-connect paused";
         if (forget) { k.lastIP.clear(); k.lastIdentity=J::object(); k.metadata=J::object(); }
@@ -538,15 +554,35 @@ struct PairingCoordinator::Impl {
             k.phase="going-home-for-pairing"; k.operation="Sending second Home key";
             task(k,"startup-home-second","simulateHomeButton");
         }
+        if (k.phase=="recovery-dismiss-delay" && now()>=k.due) {
+            k.phase="dismissing-shortcut-prompt"; k.operation="Recovery: Enter to dismiss old shortcut prompt";
+            task(k,"startup-dismiss","typeSpecialKey",{{"key","Enter"}});
+        }
+        if (k.phase=="waiting-for-pairing-arm") {
+            if (lastPairingPromptAt>=0 && lastPairingPromptAt<=k.armDeadline && now()-lastPairingPromptAt<=opt.pairingArmWindow) {
+                k.phase="prompt-delay";
+                k.due=std::max(now(),lastPairingPromptAt+opt.promptDelay);
+                k.operation="Pairing armed; waiting for shortcut prompt";
+                return;
+            }
+            if (now()>=k.armDeadline) {
+                log(k,"pairing-code-skipped",{{"reason","No recent unpaired shortcut request"},
+                    {"armingWindowSeconds",opt.pairingArmWindow},{"waitSeconds",opt.retryDelay}});
+                fail(k,"Pairing not armed: no recent unpaired shortcut request; code not typed");
+                k.due=now(); // The retry wait has already elapsed since Mouse 8.
+            } else k.operation="Waiting for unpaired shortcut request; next attempt in "+
+                std::to_string(static_cast<int>(std::ceil(k.armDeadline-now())))+" seconds";
+            return;
+        }
         if (k.phase=="shortcut-launch-delay" && now()>=k.due) {
             k.phase="starting"; k.operation="Opening shortcut with Mouse 8";
             task(k,"startup-click","clickMouseButton",{{"button",8}});
         }
         if (k.phase == "prompt-delay" && now() >= k.due) {
             if (lastPairingPromptAt < 0 || now()-lastPairingPromptAt > opt.pairingArmWindow) {
-                log(k,"pairing-code-skipped",{{"reason","No recent unpaired shortcut request"},
-                    {"armingWindowSeconds",opt.pairingArmWindow}});
-                fail(k,"Pairing not armed: no recent unpaired shortcut request; code not typed");
+                k.phase="waiting-for-pairing-arm";
+                k.operation="Waiting for unpaired shortcut request; code not typed";
+                log(k,"pairing-awaiting-arm");
                 return;
             }
             k.phase = "typing-token";
@@ -702,6 +738,7 @@ struct PairingCoordinator::Impl {
                 initial->second.at>=entry.second->started) k=entry.second.get();
             if (!k || status!="ok") return response({{"error","Unknown or expired keyboard pairing token"}},409);
             if (auto old=byIP(ip)) if (old!=k) fail(*old,"IPv4 address claimed by a new pairing attempt");
+            k->recoveryNext=false;
             k->ip=ip; k->lastIP=ip; k->initialReport=true; k->deadline=now()+opt.timeout; k->metadata=value;
             save(*k); log(*k,"keyboard-ip-bound",value); bootstrap.erase(initial); bindExisting(*k);
         } else {
@@ -979,12 +1016,12 @@ void PairingCoordinator::start() {
     }
     impl->httpLog = appendLog(impl->opt.directory+"/http.jsonl");
     if (!impl->httpLog) throw std::runtime_error("Cannot open LAN HTTP request log");
-    impl->logHttp({{"event","http-server-starting"},{"listen","0.0.0.0"},{"port",impl->opt.port}});
-    impl->server.reset(new ix::HttpServer(impl->opt.port,"0.0.0.0",128,128,AF_INET,15,5));
+    impl->logHttp({{"event","http-server-starting"},{"listen",impl->opt.listenAddress},{"port",impl->opt.port}});
+    impl->server.reset(new ix::HttpServer(impl->opt.port,impl->opt.listenAddress,128,128,AF_INET,15,5));
     impl->server->setOnConnectionCallback([this](ix::HttpRequestPtr r,std::shared_ptr<ix::ConnectionState> c) { return impl->loggedHandle(r,c); });
     auto bound=impl->server->listen(); if (!bound.first) throw std::runtime_error(bound.second);
     impl->running=true; impl->server->start(); impl->thread=std::thread([this] { impl->run(); });
-    fprintf(stderr,"ControlFloor LAN shortcut server listening on IPv4 port %u\n",port());
+    fprintf(stderr,"ControlFloor LAN shortcut server listening on %s:%u\n",impl->opt.listenAddress.c_str(),port());
 }
 void PairingCoordinator::stop() {
     if (!impl->running.exchange(false)) return;

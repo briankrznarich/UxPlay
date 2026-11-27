@@ -32,11 +32,11 @@ def exchange(sock, data):
 
 
 class Harness:
-    def __init__(self, mode="normal", capacity=2):
+    def __init__(self, mode="normal", capacity=2, bind=""):
         self.process = subprocess.Popen([HARNESS, sys.executable, WORKER, mode],
                                         stdin=subprocess.PIPE, stdout=subprocess.PIPE,
                                         text=True, bufsize=1,
-                                        env={**os.environ, "UXPLAY_TEST_CAPACITY": str(capacity)})
+                                        env={**os.environ, "UXPLAY_TEST_CAPACITY": str(capacity), "UXPLAY_TEST_BIND": bind})
         self.events = queue.Queue()
         self.lines = []
         ready = self.process.stdout.readline().split()
@@ -159,6 +159,16 @@ class SupervisorTests(unittest.TestCase):
         b, _, _ = h.connect()
         b.close()
         h.event("stopped")
+
+    def test_explicit_ipv4_binding(self):
+        h = Harness(bind="127.0.0.1")
+        self.addCleanup(h.close)
+        sock, _, _ = h.connect()
+        self.assertEqual(exchange(sock,b"bound"),b"bound")
+        with socket.socket(socket.AF_INET6,socket.SOCK_STREAM) as other:
+            other.settimeout(1)
+            with self.assertRaises(OSError):
+                other.connect(("::1",h.port))
 
     def test_backend_eof_closes_client(self):
         h = self.start()

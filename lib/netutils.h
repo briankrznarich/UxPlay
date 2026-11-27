@@ -17,6 +17,11 @@
 
 int netutils_init();
 void netutils_cleanup();
+/* Startup-only process settings. Media binds to address; proxied control stays
+ * on loopback. An empty address preserves the original wildcard behavior. */
+int netutils_set_bind_address(const char *address, int loopback_control);
+int netutils_ipv4_only(void);
+int netutils_init_control_socket(unsigned short *port, int use_ipv6);
 int netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp);
 unsigned char *netutils_get_address(void *sockaddr, int *length, unsigned int *zone_id, unsigned short *port);
 int netutils_parse_address(int family, const char *src, void *dst, int dstlen);

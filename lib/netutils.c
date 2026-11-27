@@ -110,9 +110,30 @@ netutils_get_address(void *sockaddr, int *length, unsigned int *zone_id, unsigne
     return NULL;
 }
 
-int
-netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp)
+static struct in_addr bind_address;
+static int bind_enabled = 0, bind_control_loopback = 0;
+
+int netutils_set_bind_address(const char *address, int loopback_control) {
+    if (!address || !*address) { bind_enabled = bind_control_loopback = 0; return 0; }
+    if (inet_pton(AF_INET, address, &bind_address) != 1) return -1;
+    bind_enabled = 1;
+    bind_control_loopback = loopback_control;
+    return 0;
+}
+
+int netutils_ipv4_only(void) { return bind_enabled; }
+
+static int
+init_socket_bound(unsigned short *port, int use_ipv6, int use_udp, int control)
 {
+    if (use_ipv6 && bind_enabled) {
+#ifdef _WIN32
+        SOCKET_SET_ERROR(WSAEAFNOSUPPORT);
+#else
+        SOCKET_SET_ERROR(EAFNOSUPPORT);
+#endif
+        return -1;
+    }
     int family = use_ipv6 ? AF_INET6 : AF_INET;
     int type = use_udp ? SOCK_DGRAM : SOCK_STREAM;
     int proto = use_udp ? IPPROTO_UDP : IPPROTO_TCP;
@@ -180,7 +201,9 @@ netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp)
 
         /* Initialize sockaddr for bind */
         sinptr->sin_family = family;
-        sinptr->sin_addr.s_addr = INADDR_ANY;
+        sinptr->sin_addr.s_addr = bind_enabled
+            ? (control && bind_control_loopback ? htonl(INADDR_LOOPBACK) : bind_address.s_addr)
+            : INADDR_ANY;
         sinptr->sin_port = htons(*port);
 
         socklen = sizeof(*sinptr);
@@ -204,6 +227,14 @@ netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp)
     }
     SOCKET_SET_ERROR(ret);
     return -1;
+}
+
+int netutils_init_socket(unsigned short *port, int use_ipv6, int use_udp) {
+    return init_socket_bound(port, use_ipv6, use_udp, 0);
+}
+
+int netutils_init_control_socket(unsigned short *port, int use_ipv6) {
+    return init_socket_bound(port, use_ipv6, 0, 1);
 }
 
 // Src is the ip address

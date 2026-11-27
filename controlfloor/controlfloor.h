@@ -6,6 +6,8 @@ extern "C" {
 #endif
 int cf_option(int argc, char **argv, int *index);
 void cf_help(void);
+/* Set before starting the parent LAN coordinator. */
+void cf_set_listen_address(const char *address);
 /* Returns 1 for registration-only completion, -1 on error, 0 to continue. */
 int cf_prepare(void);
 int cf_start(void);

@@ -321,8 +321,15 @@ bool Supervisor::start(std::string &message) {
     }
     impl->service = g_socket_service_new();
     GError *error = NULL;
-    if (impl->options.ipv4_only) {
-        GInetAddress *address = g_inet_address_new_any(G_SOCKET_FAMILY_IPV4);
+    if (impl->options.ipv4_only || !impl->options.bind_address.empty()) {
+        GInetAddress *address = impl->options.bind_address.empty()
+            ? g_inet_address_new_any(G_SOCKET_FAMILY_IPV4)
+            : g_inet_address_new_from_string(impl->options.bind_address.c_str());
+        if (!address || g_inet_address_get_family(address) != G_SOCKET_FAMILY_IPV4) {
+            if (address) g_object_unref(address);
+            message = "Invalid IPv4 bind address";
+            return false;
+        }
         GSocketAddress *endpoint = g_inet_socket_address_new(address, impl->options.port), *bound = NULL;
         if (g_socket_listener_add_address(G_SOCKET_LISTENER(impl->service), endpoint,
                 G_SOCKET_TYPE_STREAM, G_SOCKET_PROTOCOL_TCP, NULL, &bound, &error)) {

@@ -17,7 +17,7 @@ from calibration_client import complete_calibration
 
 async def main(binary, demo=False):
     host='keyboard-A'; inventory=[host]; calls=[]; timed_calls=[]; tasks=[]; outputs=[]
-    request=None; code=''; process=None; reader=None; base=''; token=''
+    request=None; code=''; typed_pending=False; process=None; reader=None; base=''; token=''
     capture='idle'; connected=False; cf=False; ready=False; worker='receiver-1'
     status_task=None; mirror_count=0; serial='TEST23456789'; mode='manual'
     calibration_release=asyncio.Event();calibration_release.set();calibration_urls=[]
@@ -59,7 +59,7 @@ async def main(binary, demo=False):
         return web.json_response({'bluetoothHosts':[dict(bluetoothHost=h,keyboard=True,consumerControls=True,liveMouse=True,
             mouse=dict(logicalWidth=375,logicalHeight=667,down=False,capture=dict(state=capture,error=None))) for h in inventory]})
     async def post(r):
-        nonlocal request,code,capture,mirror_count,ready,about_fetched
+        nonlocal request,code,capture,mirror_count,ready,about_fetched,typed_pending
         body=await r.json(); action=r.match_info['action'];calls.append((action,body));timed_calls.append((time.monotonic(),action,body))
         if body['device']!=host:return web.json_response({'submitted':True,'mouse':{'down':action=='mouseDown'}})
         if action=='mouseUp' and (mode in ('pair','reuse') or ready):
@@ -73,10 +73,13 @@ async def main(binary, demo=False):
                 assert (await report(fetched))[0]==200
                 ready=True;about_fetched=True
                 if hold_about:await about_release.wait()
-        if action=='type':code=body['text']
+        if action=='type':code=body['text'];typed_pending=True
         if action=='typeSpecialKey':
             key=body['key']
-            if key=='Enter':
+            if key=='Enter' and not typed_pending:
+                pass # Recovery dismisses an old popup before M8.
+            elif key=='Enter':
+                typed_pending=False
                 assert request and request['command']=='initiate-pairing',request
                 assert (await report(request,pairingId=code,model='iPhone SE',iosVersion='26.6'))[0]==200
             elif key=='replayCapture':
@@ -215,13 +218,11 @@ async def main(binary, demo=False):
                 assert bound['ip']=='127.0.0.1' and bound['bindingVerified'] and bound['pairingCode']==code
                 assert mirror_count==0,'Manual Pair Keyboard must stop at callback, before replay'
                 startup=timed_calls[pairing_call_start:]
-                assert [a for _,a,_ in startup]==['typeSpecialKey','typeSpecialKey','mouseDown','mouseUp','type','typeSpecialKey'],startup
-                assert [b['key'] for _,a,b in startup if a=='typeSpecialKey']==['GoHome','GoHome','Enter']
-                assert startup[1][0]-startup[0][0]>=1, startup
-                assert startup[2][0]-startup[1][0]>=1, startup
-                assert startup[4][0]-startup[3][0]>=5, startup
-                assert startup[4][2]['text']==code
-                print('PASS real startup timings: Home, 1s, Home, 1s, Mouse 8, 5s, armed pairing code, Enter')
+                assert [a for _,a,_ in startup]==['mouseDown','mouseUp','type','typeSpecialKey'],startup
+                assert [b['key'] for _,a,b in startup if a=='typeSpecialKey']==['Enter']
+                assert startup[2][0]-startup[1][0]>=5, startup
+                assert startup[2][2]['text']==code
+                print('PASS first startup preserves screen: Mouse 8, 5s, armed pairing code, Enter')
                 assert not bound['autoConnect']
                 mode='manual';calibration_release.clear();await control('mirror')
                 blocked=await until(lambda:matches(phase='calibration'))
